@@ -1,0 +1,158 @@
+from __future__ import annotations
+
+import os
+import shutil
+import tempfile
+from pathlib import Path
+
+import streamlit as st
+from dotenv import load_dotenv
+from faster_whisper import WhisperModel
+
+from shortsai import ffmpeg_util
+from shortsai.pipeline import (
+    MAX_DURATION_SEC,
+    metadata_to_json_bytes,
+    process_upload,
+)
+
+load_dotenv()
+
+ROOT = Path(__file__).resolve().parent
+MUSIC_DIR = ROOT / "assets" / "music"
+AUDIO_EXT = {".mp3", ".wav", ".m4a", ".aac", ".ogg"}
+
+
+@st.cache_resource
+def _whisper_model() -> WhisperModel:
+    name = os.environ.get("SHORTSAI_WHISPER_MODEL", "base")
+    device = os.environ.get("SHORTSAI_WHISPER_DEVICE", "cpu")
+    ctype = os.environ.get("SHORTSAI_WHISPER_COMPUTE", "int8")
+    return WhisperModel(name, device=device, compute_type=ctype)
+
+
+def _list_music() -> list[Path]:
+    if not MUSIC_DIR.is_dir():
+        return []
+    return sorted(
+        p for p in MUSIC_DIR.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXT
+    )
+
+
+def main() -> None:
+    st.set_page_config(page_title="ShortsAI Studio", page_icon="🎬", layout="centered")
+    st.title("ShortsAI Studio")
+    st.caption("Upload a short clip → captions, 9:16 export, title/description/tags (optional GPT).")
+
+    try:
+        ffmpeg_util.require_ffmpeg()
+    except ffmpeg_util.FFmpegError as e:
+        st.error(str(e))
+        st.stop()
+
+    api_key = os.environ.get("OPENAI_API_KEY") or ""
+    if not api_key:
+        st.info("Optional: set `OPENAI_API_KEY` in a `.env` file for GPT metadata; otherwise simple fallbacks are used.")
+
+    uploaded = st.file_uploader(
+        "Video (max 60s)",
+        type=["mp4", "mov", "webm", "mkv", "avi"],
+    )
+
+    music_files = _list_music()
+    music_choice: Path | None = None
+    if music_files:
+        options = ["None"] + [p.name for p in music_files]
+        sel = st.selectbox(
+            "Background music (YouTube Audio Library files in `assets/music/`)",
+            options,
+        )
+        if sel != "None":
+            music_choice = next(p for p in music_files if p.name == sel)
+    else:
+        st.caption("Add tracks under `assets/music/` (from YouTube Studio → Audio library) to enable music mixing.")
+
+    music_vol = st.slider("Music volume (relative to speech)", 0.0, 0.5, 0.18, 0.02)
+
+    if uploaded is None:
+        st.stop()
+
+    st.video(uploaded)
+
+    if st.button("Process", type="primary"):
+        suffix = Path(uploaded.name).suffix or ".mp4"
+        work = Path(tempfile.mkdtemp(prefix="shortsai_"))
+        src = work / f"upload{suffix}"
+        src.write_bytes(uploaded.getvalue())
+
+        status = st.status("Working…", expanded=True)
+        prog_msgs: list[str] = []
+
+        def on_progress(msg: str) -> None:
+            prog_msgs.append(msg)
+            status.write(msg)
+
+        try:
+            dur = ffmpeg_util.probe_duration_seconds(src)
+            if dur > MAX_DURATION_SEC + 0.05:
+                status.update(label="Too long", state="error")
+                st.error(f"This clip is {dur:.1f}s. Max is {MAX_DURATION_SEC:.0f}s for v1.")
+                return
+
+            model = _whisper_model()
+            mp4_bytes, meta = process_upload(
+                src,
+                work_dir=work,
+                whisper=model,
+                whisper_model=os.environ.get("SHORTSAI_WHISPER_MODEL", "base"),
+                openai_api_key=api_key.strip() or None,
+                music_path=music_choice,
+                music_volume=music_vol,
+                progress=on_progress,
+            )
+            if music_choice is not None:
+                meta["music_file"] = music_choice.name
+            else:
+                meta["music_file"] = None
+
+            status.update(label="Done", state="complete")
+        except ValueError as e:
+            status.update(label="Failed", state="error")
+            st.error(str(e))
+            return
+        except ffmpeg_util.FFmpegError as e:
+            status.update(label="Failed", state="error")
+            st.error(str(e))
+            return
+        except Exception as e:
+            status.update(label="Failed", state="error")
+            st.exception(e)
+            return
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+        st.success("Export ready.")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button(
+                "Download MP4",
+                data=mp4_bytes,
+                file_name="shorts_export.mp4",
+                mime="video/mp4",
+            )
+        with c2:
+            st.download_button(
+                "Download metadata.json",
+                data=metadata_to_json_bytes(meta),
+                file_name="metadata.json",
+                mime="application/json",
+            )
+
+        with st.expander("Preview metadata"):
+            st.json({k: v for k, v in meta.items() if k != "transcript"})
+        with st.expander("Transcript"):
+            st.write(meta.get("transcript", ""))
+
+
+if __name__ == "__main__":
+    main()

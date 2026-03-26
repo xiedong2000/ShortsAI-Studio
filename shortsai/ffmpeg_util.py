@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+class FFmpegError(RuntimeError):
+    pass
+
+
+def _exe_names() -> tuple[str, str]:
+    if sys.platform == "win32":
+        return "ffmpeg.exe", "ffprobe.exe"
+    return "ffmpeg", "ffprobe"
+
+
+def ffmpeg_binaries() -> tuple[Path, Path]:
+    """
+    Resolve ffmpeg and ffprobe executables.
+
+    Order:
+    1. FFMPEG_PATH and FFPROBE_PATH (full paths to each binary)
+    2. SHORTSAI_FFMPEG_DIR (folder containing both; typical on Windows when PATH is not set)
+    3. PATH (shutil.which)
+    """
+    ff_name, fp_name = _exe_names()
+
+    p_ffmpeg = os.environ.get("FFMPEG_PATH", "").strip()
+    p_ffprobe = os.environ.get("FFPROBE_PATH", "").strip()
+    if p_ffmpeg and p_ffprobe:
+        a, b = Path(p_ffmpeg), Path(p_ffprobe)
+        if a.is_file() and b.is_file():
+            return a, b
+        raise FFmpegError(
+            "FFMPEG_PATH / FFPROBE_PATH are set but one or both files were not found. "
+            f"FFMPEG_PATH={p_ffmpeg!r} FFPROBE_PATH={p_ffprobe!r}"
+        )
+
+    d = os.environ.get("SHORTSAI_FFMPEG_DIR", "").strip()
+    if d:
+        folder = Path(d).expanduser()
+        a, b = folder / ff_name, folder / fp_name
+        if a.is_file() and b.is_file():
+            return a, b
+        raise FFmpegError(
+            f"SHORTSAI_FFMPEG_DIR is set to {d!r} but {ff_name} and/or {fp_name} were not found there. "
+            "Point it at the folder that contains both executables (often ...\\ffmpeg\\bin after unzipping)."
+        )
+
+    w1 = shutil.which("ffmpeg")
+    w2 = shutil.which("ffprobe")
+    if w1 and w2:
+        return Path(w1), Path(w2)
+
+    raise FFmpegError(
+        "Could not find ffmpeg and ffprobe.\n\n"
+        "• Install them and ensure your **terminal** sees them on PATH, then **restart** the terminal "
+        "and Streamlit (Windows: `winget install Gyan.FFmpeg`).\n"
+        "• Or set **SHORTSAI_FFMPEG_DIR** in `.env` to the folder that contains `ffmpeg.exe` and "
+        "`ffprobe.exe` (for example `C:\\\\ffmpeg\\\\bin`).\n"
+        "• Or set **FFMPEG_PATH** and **FFPROBE_PATH** to each executable."
+    )
+
+
+def require_ffmpeg() -> None:
+    ffmpeg_binaries()
+
+
+def probe_duration_seconds(path: Path) -> float:
+    _, ffprobe = ffmpeg_binaries()
+    r = subprocess.run(
+        [
+            str(ffprobe),
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if r.returncode != 0:
+        raise FFmpegError(r.stderr or "ffprobe failed")
+    try:
+        return float(r.stdout.strip())
+    except ValueError as e:
+        raise FFmpegError("Could not read duration") from e
+
+
+def run_ffmpeg(args: list[str], *, cwd: Path | None = None) -> None:
+    ffmpeg, _ = ffmpeg_binaries()
+    r = subprocess.run(
+        [str(ffmpeg), "-hide_banner", "-loglevel", "warning", *args],
+        capture_output=True,
+        text=True,
+        cwd=str(cwd) if cwd else None,
+        check=False,
+    )
+    if r.returncode != 0:
+        msg = (r.stderr or r.stdout or "").strip() or "ffmpeg failed"
+        raise FFmpegError(msg)

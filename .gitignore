@@ -1,0 +1,12 @@
+# Local YouTube Audio Library downloads (add paths you use)
+assets/music/*.mp3
+assets/music/*.wav
+assets/music/*.m4a
+assets/music/*.aac
+assets/music/*.ogg
+
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
