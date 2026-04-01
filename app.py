@@ -42,7 +42,10 @@ def _list_music() -> list[Path]:
 def main() -> None:
     st.set_page_config(page_title="ShortsAI Studio", page_icon="🎬", layout="centered")
     st.title("ShortsAI Studio")
-    st.caption("Upload a short clip → captions, 9:16 export, title/description/tags (optional GPT).")
+    st.caption(
+        "Upload a short clip → burned-in speech captions (if any), 9:16 export, scene text overlays, "
+        "and title/description/tags in metadata.json for YouTube (not burned as title/desc/hashtags)."
+    )
 
     try:
         ffmpeg_util.require_ffmpeg()
@@ -74,7 +77,11 @@ def main() -> None:
 
     music_vol = st.slider("Music volume (relative to speech)", 0.0, 0.5, 0.18, 0.02)
 
-    add_overlays = st.checkbox("Add text overlays (title, description, hashtags)", value=False, help="Note: Text overlays with special characters may fail. Captions from speech are more reliable.")
+    manual_overlay_text = st.text_input(
+        "Optional: override on-screen scene text (one line; replaces AI lines for this export)",
+        value="",
+        help="Leave empty to auto-generate timed scene lines (vision + GPT). Title, description, and tags are only in metadata.json.",
+    )
 
     if uploaded is None:
         st.stop()
@@ -110,7 +117,7 @@ def main() -> None:
                 openai_api_key=api_key.strip() or None,
                 music_path=music_choice,
                 music_volume=music_vol,
-                add_text_overlays=add_overlays,
+                manual_overlay_text=manual_overlay_text.strip() or None,
                 progress=on_progress,
             )
             if music_choice is not None:

@@ -94,6 +94,41 @@ def probe_duration_seconds(path: Path) -> float:
         raise FFmpegError("Could not read duration") from e
 
 
+def probe_video_start_time_seconds(path: Path) -> float:
+    """
+    First video stream PTS start (seconds). Often 0; some MP4/MOV use a positive offset.
+    drawtext enable=between(t,...) uses this timeline—windows must be offset or only the
+    first split-second matches.
+    """
+    _, ffprobe = ffmpeg_binaries()
+    r = subprocess.run(
+        [
+            str(ffprobe),
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=start_time",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if r.returncode != 0:
+        return 0.0
+    s = (r.stdout or "").strip()
+    if not s or s.lower() in ("n/a", "nan"):
+        return 0.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
 def has_audio_stream(path: Path) -> bool:
     """Check if video file has an audio stream."""
     _, ffprobe = ffmpeg_binaries()
@@ -115,6 +150,96 @@ def has_audio_stream(path: Path) -> bool:
         check=False,
     )
     return r.returncode == 0 and r.stdout.strip() != ""
+
+
+def extract_jpeg_frames_evenly(
+    video: Path,
+    work_dir: Path,
+    *,
+    max_frames: int = 6,
+    file_prefix: str = "vision_frame",
+) -> list[Path]:
+    """
+    Grab evenly spaced stills from a video (for vision APIs).
+    Uses absolute path for input so cwd only needs to hold outputs.
+    """
+    dur = probe_duration_seconds(video)
+    if dur <= 0:
+        return []
+    # ~one frame every ~2.5s, at least 2 for context (or 1 if very short)
+    n = min(max_frames, max(1, min(max_frames, int(dur / 2.5) + 1)))
+    if dur < 1.2:
+        n = 1
+    paths: list[Path] = []
+    v_abs = str(video.resolve())
+    for i in range(n):
+        t = dur * (i + 1) / (n + 1)
+        out = work_dir / f"{file_prefix}_{i:02d}.jpg"
+        run_ffmpeg(
+            [
+                "-y",
+                "-ss",
+                f"{t:.3f}",
+                "-i",
+                v_abs,
+                "-frames:v",
+                "1",
+                "-q:v",
+                "3",
+                out.name,
+            ],
+            cwd=work_dir,
+        )
+        if out.is_file() and out.stat().st_size > 0:
+            paths.append(out)
+    return paths
+
+
+def extract_jpeg_frames_per_segment(
+    video: Path,
+    work_dir: Path,
+    *,
+    n_segments: int,
+    file_prefix: str = "overlay_seg",
+) -> list[list[Path]]:
+    """
+    For each chronological segment of the video, extract 1–2 JPEGs from inside that segment
+    (for vision captions aligned with on-screen timing).
+    """
+    dur = probe_duration_seconds(video)
+    if dur <= 0 or n_segments < 1:
+        return []
+    v_abs = str(video.resolve())
+    groups: list[list[Path]] = []
+    for i in range(n_segments):
+        t0 = dur * i / n_segments
+        t1 = dur * (i + 1) / n_segments
+        span = t1 - t0
+        # Two samples per segment if long enough; else center of segment
+        fracs = (0.35, 0.65) if span >= 1.0 else (0.5,)
+        group: list[Path] = []
+        for j, frac in enumerate(fracs):
+            t = t0 + frac * span
+            out = work_dir / f"{file_prefix}_{i:02d}_{j}.jpg"
+            run_ffmpeg(
+                [
+                    "-y",
+                    "-ss",
+                    f"{t:.3f}",
+                    "-i",
+                    v_abs,
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "3",
+                    out.name,
+                ],
+                cwd=work_dir,
+            )
+            if out.is_file() and out.stat().st_size > 0:
+                group.append(out)
+        groups.append(group)
+    return groups
 
 
 def run_ffmpeg(args: list[str], *, cwd: Path | None = None) -> None:
