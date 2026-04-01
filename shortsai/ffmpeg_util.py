@@ -94,10 +94,34 @@ def probe_duration_seconds(path: Path) -> float:
         raise FFmpegError("Could not read duration") from e
 
 
+def has_audio_stream(path: Path) -> bool:
+    """Check if video file has an audio stream."""
+    _, ffprobe = ffmpeg_binaries()
+    r = subprocess.run(
+        [
+            str(ffprobe),
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return r.returncode == 0 and r.stdout.strip() != ""
+
+
 def run_ffmpeg(args: list[str], *, cwd: Path | None = None) -> None:
     ffmpeg, _ = ffmpeg_binaries()
+    cmd = [str(ffmpeg), "-hide_banner", "-loglevel", "info", *args]
     r = subprocess.run(
-        [str(ffmpeg), "-hide_banner", "-loglevel", "warning", *args],
+        cmd,
         capture_output=True,
         text=True,
         cwd=str(cwd) if cwd else None,
@@ -105,4 +129,6 @@ def run_ffmpeg(args: list[str], *, cwd: Path | None = None) -> None:
     )
     if r.returncode != 0:
         msg = (r.stderr or r.stdout or "").strip() or "ffmpeg failed"
-        raise FFmpegError(msg)
+        # Include the command that failed for debugging
+        cmd_str = " ".join(cmd)
+        raise FFmpegError(f"ffmpeg command failed: {cmd_str}\n\n{msg}")

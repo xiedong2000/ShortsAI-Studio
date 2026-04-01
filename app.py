@@ -74,6 +74,8 @@ def main() -> None:
 
     music_vol = st.slider("Music volume (relative to speech)", 0.0, 0.5, 0.18, 0.02)
 
+    add_overlays = st.checkbox("Add text overlays (title, description, hashtags)", value=False, help="Note: Text overlays with special characters may fail. Captions from speech are more reliable.")
+
     if uploaded is None:
         st.stop()
 
@@ -108,6 +110,7 @@ def main() -> None:
                 openai_api_key=api_key.strip() or None,
                 music_path=music_choice,
                 music_volume=music_vol,
+                add_text_overlays=add_overlays,
                 progress=on_progress,
             )
             if music_choice is not None:
