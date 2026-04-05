@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from faster_whisper import WhisperModel
 
@@ -27,11 +28,15 @@ def transcribe(
     model_name: str = "base",
     device: str = "cpu",
     compute_type: str = "int8",
+    language: str | None = None,
+    task: Literal["transcribe", "translate"] = "transcribe",
 ) -> TranscriptResult:
     if model is None:
         model = WhisperModel(model_name, device=device, compute_type=compute_type)
     segments_iter, info = model.transcribe(
         str(audio_path),
+        language=language or None,
+        task=task,
         word_timestamps=True,
         vad_filter=True,
     )
@@ -57,8 +62,11 @@ def transcribe(
     if not words and text:
         words = [WordSpan(start=0.0, end=max(info.duration, 0.1), text=text)]
 
+    # Whisper "translate" always targets English text; keep metadata accurate for downstream.
+    out_language = "en" if task == "translate" else (info.language or "en")
+
     return TranscriptResult(
-        language=info.language or "en",
+        language=out_language,
         text=text,
         words=words,
     )

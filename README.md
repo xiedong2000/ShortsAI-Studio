@@ -59,6 +59,8 @@ Edit `.env` if you want:
 - **GPT metadata:** Add your `OPENAI_API_KEY`
 - **Whisper tuning:**
   - `SHORTSAI_WHISPER_MODEL` — default `base` (`tiny` is faster, `small` more accurate).
+  - `SHORTSAI_WHISPER_TASK` — default `transcribe` (subtitles match the spoken language). Set to **`translate`** to get **English** subtitles and transcript when the audio is Chinese or any other language Whisper supports. In the Streamlit app you can choose this per export (**Subtitles & transcript**); the UI defaults match these env vars.
+  - `SHORTSAI_WHISPER_LANGUAGE` — optional ISO 639-1 hint (e.g. `zh`) if auto-detection is wrong; leave unset for auto-detect. Also available in the app (optional text field); leave empty there for auto-detect (empty overrides `.env` for that run).
   - `SHORTSAI_WHISPER_DEVICE` / `SHORTSAI_WHISPER_COMPUTE` — e.g. `cuda` and `float16` if you have a GPU.
 - **ffmpeg not on PATH for Streamlit:** Set `SHORTSAI_FFMPEG_DIR` to the folder that contains **both** `ffmpeg` and `ffprobe` (on Windows, both `.exe`). This is useful right after `winget install Gyan.FFmpeg` when your IDE has not picked up the updated PATH yet—Winget often adds shims under `%LOCALAPPDATA%\Microsoft\WinGet\Links` (adjust the drive/username as needed). Alternatively set `FFMPEG_PATH` and `FFPROBE_PATH` to each executable. See `.env.example` for commented placeholders and [Fix ffmpeg Error](#fix-ffmpeg-error) below.
 

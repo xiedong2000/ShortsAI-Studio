@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from typing import Literal
 import shutil
 import tempfile
 from pathlib import Path
@@ -83,6 +84,27 @@ def main() -> None:
         help="Leave empty to auto-generate timed scene lines (vision + GPT). Title, description, and tags are only in metadata.json.",
     )
 
+    _env_task = (os.environ.get("SHORTSAI_WHISPER_TASK") or "transcribe").strip().lower()
+    _sub_default = 1 if _env_task == "translate" else 0
+    sub_choice = st.radio(
+        "Subtitles & transcript",
+        (
+            "Same as spoken language",
+            "English (translate speech to English)",
+        ),
+        index=_sub_default,
+        help="Translate uses Whisper to output English for burned-in captions and the transcript, even when speech is not English.",
+    )
+    whisper_task_ui: Literal["transcribe", "translate"] = (
+        "translate" if sub_choice.startswith("English") else "transcribe"
+    )
+    _hint_default = (os.environ.get("SHORTSAI_WHISPER_LANGUAGE") or "").strip()
+    speech_lang_hint_ui = st.text_input(
+        "Optional speech language hint (ISO 639-1, e.g. zh, ja, ko). Leave empty for auto-detect.",
+        value=_hint_default,
+        help="Helps Whisper when auto-detection is wrong. Does not change subtitle language unless you use translation above.",
+    ).strip()
+
     if uploaded is None:
         st.stop()
 
@@ -119,6 +141,8 @@ def main() -> None:
                 music_volume=music_vol,
                 manual_overlay_text=manual_overlay_text.strip() or None,
                 progress=on_progress,
+                whisper_task=whisper_task_ui,
+                whisper_language_hint=speech_lang_hint_ui,
             )
             if music_choice is not None:
                 meta["music_file"] = music_choice.name

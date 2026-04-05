@@ -5,7 +5,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal, cast
 
 from faster_whisper import WhisperModel
 
@@ -14,6 +14,8 @@ from shortsai.metadata_llm import (
     generate_metadata,
     generate_overlay_text,
     generate_overlay_text_from_vision_segments,
+    sanitize_overlay_lines,
+    strip_overlay_quotes,
 )
 from shortsai.srt_build import words_to_srt
 from shortsai.transcribe import transcribe
@@ -25,6 +27,13 @@ SHORT_HEIGHT = 1920
 
 # Copied into work_dir so drawtext can use fontfile=name.ttf (no Windows drive colons in -vf).
 _OVERLAY_FONT_LOCAL_NAME = "shortsai_overlay.ttf"
+
+# Scene overlay (drawtext): bold face via TTF, red fill, shadow + thin outline for contrast.
+_OVERLAY_DRAWTEXT_STYLE = (
+    "fontcolor=0xFF0000:fontsize=44:"
+    "borderw=2:bordercolor=black@0.85:"
+    "shadowcolor=black@0.75:shadowx=4:shadowy=4"
+)
 
 
 def _drawtext_enable_between(t_start: float, t_end: float) -> str:
@@ -59,12 +68,30 @@ def _resolve_overlay_font_source() -> Path | None:
         candidates.append(Path(env))
     if sys.platform == "win32":
         windir = os.environ.get("WINDIR", "C:\\Windows")
-        candidates.append(Path(windir) / "Fonts" / "arial.ttf")
+        fonts = Path(windir) / "Fonts"
+        candidates.extend(
+            [
+                fonts / "arialbd.ttf",
+                fonts / "calibrib.ttf",
+                fonts / "segoeuib.ttf",
+                fonts / "arial.ttf",
+            ]
+        )
     elif sys.platform == "darwin":
-        candidates.append(Path("/System/Library/Fonts/Supplemental/Arial.ttf"))
+        supp = Path("/System/Library/Fonts/Supplemental")
+        candidates.extend(
+            [
+                supp / "Arial Bold.ttf",
+                supp / "Arial.ttf",
+                Path("/Library/Fonts/Arial Bold.ttf"),
+                Path("/Library/Fonts/Arial.ttf"),
+            ]
+        )
     else:
         candidates.extend(
             [
+                Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+                Path("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
                 Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
                 Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
             ]
@@ -165,7 +192,8 @@ def _add_text_overlay(
     progress_emit: Callable[[str], None],
 ) -> None:
     """Burn scene-based on-screen lines only (title/description/tags stay in metadata, not here)."""
-    lines = [x.strip() for x in overlay_texts[:4] if x.strip()]
+    lines = [strip_overlay_quotes(x.strip()) for x in overlay_texts[:4] if x.strip()]
+    lines = [x for x in lines if x]
     if not lines:
         raise ValueError("overlay_texts must contain at least one non-empty line")
 
@@ -193,7 +221,7 @@ def _add_text_overlay(
         esc_text = escape_text(text_content)
         t0, t1 = _overlay_text_segment_window(idx, n_lines, duration_sec)
         overlay_filters.append(
-            f'drawtext=text="{esc_text}"{font_clause}:fontcolor=white:fontsize=42:'
+            f'drawtext=text="{esc_text}"{font_clause}:{_OVERLAY_DRAWTEXT_STYLE}:'
             f"x=(w-text_w)/2:y=(h-text_h)/2:{_drawtext_enable_between(pts0 + t0, pts0 + t1)}"
         )
 
@@ -276,6 +304,8 @@ def process_upload(
     music_volume: float = 0.18,
     manual_overlay_text: str | None = None,
     progress: Callable[[str], None] | None = None,
+    whisper_task: Literal["transcribe", "translate"] | None = None,
+    whisper_language_hint: str | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """
     Full pipeline: validate duration → transcribe → SRT → 9:16 + burn-in subs → optional music
@@ -322,12 +352,31 @@ def process_upload(
         log("Audio file is empty - no transcription possible")
         tr = TranscriptResult(language="en", text="", words=[])
     else:
+        if whisper_task is not None:
+            resolved_wtask: Literal["transcribe", "translate"] = whisper_task
+        else:
+            task_raw = (os.environ.get("SHORTSAI_WHISPER_TASK") or "transcribe").strip().lower()
+            resolved_wtask = cast(
+                Literal["transcribe", "translate"],
+                "translate" if task_raw == "translate" else "transcribe",
+            )
+        if resolved_wtask == "translate":
+            log("Whisper task=translate (subtitles and transcript will be English).")
+        # None = caller did not pass (e.g. script): use .env. Empty str from UI = auto-detect.
+        if whisper_language_hint is None:
+            lang_hint = (os.environ.get("SHORTSAI_WHISPER_LANGUAGE") or "").strip().lower() or None
+        else:
+            lang_hint = whisper_language_hint.strip().lower() or None
+        if lang_hint:
+            log(f"Whisper language hint: {lang_hint}")
         tr = transcribe(
             wav,
             model=whisper,
             model_name=whisper_model,
             device=device,
             compute_type=compute_type,
+            language=lang_hint,
+            task=resolved_wtask,
         )
 
     if not tr.words:
@@ -443,6 +492,8 @@ def process_upload(
                     overlay_texts = [text_for_lines[:50] if text_for_lines else "Short clip"]
             if meta.get("overlay_text_source") is None:
                 meta["overlay_text_source"] = "text_fallback"
+
+    overlay_texts = sanitize_overlay_lines(overlay_texts)
 
     meta["on_screen_overlay_lines"] = list(overlay_texts)
 

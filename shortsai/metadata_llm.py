@@ -8,6 +8,35 @@ from typing import Any
 
 from openai import OpenAI
 
+# Double quotes + guillemets: remove everywhere (model often wraps lines in "..." or „…").
+_OVERLAY_QUOTE_GLOBAL = frozenset(
+    "\""
+    "\u201c\u201d"  # “ ”
+    "\u201e\u201f"  # „ ‟
+    "\uff02"  # ＂ fullwidth
+    "\u00ab\u00bb"  # « »
+    "\u2039\u203a"  # ‹ ›
+)
+# Singles: strip only from line ends so internal apostrophes (It's) stay intact.
+_OVERLAY_QUOTE_EDGE_SINGLE = frozenset("'\u2018\u2019\u201a\u201b")
+
+
+def strip_overlay_quotes(s: str) -> str:
+    """Remove wrapping and decorative quotes from a single overlay line."""
+    s = (s or "").strip()
+    s = "".join(c for c in s if c not in _OVERLAY_QUOTE_GLOBAL)
+    s = s.strip()
+    while s and s[0] in _OVERLAY_QUOTE_EDGE_SINGLE:
+        s = s[1:].strip()
+    while s and s[-1] in _OVERLAY_QUOTE_EDGE_SINGLE:
+        s = s[:-1].strip()
+    return s
+
+
+def sanitize_overlay_lines(lines: list[str]) -> list[str]:
+    """Strip quotes from each line and drop empties."""
+    return [x for x in (strip_overlay_quotes(t) for t in lines) if x]
+
 
 def _fallback_metadata(transcript: str) -> dict[str, Any]:
     t = transcript.strip()
@@ -95,13 +124,19 @@ def generate_overlay_text_from_vision_segments(
     hint = spoken_context.strip()[:500]
 
     header = (
-        f"This is a {duration_sec:.2f}s vertical (9:16) short. Images are grouped in time order. "
-        f"Each group is labeled with its time range in the clip. "
+        f"This is a {duration_sec:.2f}s vertical (9:16) YouTube Short. Images are grouped in time order; "
+        f"each group covers one segment of the timeline. "
         f"Reply with a JSON array only (no markdown): exactly {n} strings. "
-        f"String i (1-based: first string for part 1, etc.) must describe ONLY what is visible in that part's images—"
-        f"that moment of the video—not other parts. Max 48 characters per string. "
-        f"Literal, concrete (who/what/where/action/lighting). No generic motivational filler. "
-        f"No hashtags. No nested quotes inside strings."
+        f"String i must be the on-screen caption shown WHILE that part plays. "
+        f"Goal: lines that help **get views and watch time**—hooks, curiosity, tension, relatability, "
+        f"or a clear payoff tease—NOT dry picture captions like 'a person in a room'. "
+        f"Each line must still be **grounded in what is actually visible** in that part's images (and the optional hint); "
+        f"do not invent facts, stunts, or outcomes that contradict the frames. "
+        f"Vary style across segments (e.g. question, bold claim tied to the scene, 'POV:', 'Here's why…', "
+        f"relatable joke, countdown vibe) where it fits; avoid repeating the same opening word every line. "
+        f"Max 48 characters per string. No hashtags, no emojis. Write plain words only—never surround a line "
+        f"with \" or ' or typographic quotes; no quotation marks anywhere in the caption. "
+        f"No nested double quotes inside strings."
     )
     if hint:
         header += f" Optional hint (may be wrong—prefer the grouped images): {hint}"
@@ -121,7 +156,10 @@ def generate_overlay_text_from_vision_segments(
             user_content.append(
                 {
                     "type": "text",
-                    "text": "(No frame for this part—output a very short neutral line like 'Scene continues' under 48 chars.)",
+                    "text": (
+                        "(No frame for this part—output one very short retention-friendly line under 48 chars, "
+                        "e.g. teasing what comes next, still plausible for a Short.)"
+                    ),
                 }
             )
             continue
@@ -148,12 +186,15 @@ def generate_overlay_text_from_vision_segments(
             messages=[
                 {
                     "role": "system",
-                    "content": f"Reply with valid JSON only: a JSON array of exactly {n} strings.",
+                    "content": (
+                        f"You write YouTube Shorts on-screen captions that boost engagement. "
+                        f"Reply with valid JSON only: a JSON array of exactly {n} strings."
+                    ),
                 },
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.35,
-            max_tokens=450,
+            temperature=0.55,
+            max_tokens=500,
         )
         content = (resp.choices[0].message.content or "").strip()
         content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.I)
@@ -164,10 +205,11 @@ def generate_overlay_text_from_vision_segments(
         arr = json.loads(m.group())
         if not isinstance(arr, list):
             return []
-        out = [str(x).strip() for x in arr if str(x).strip()]
+        out = [strip_overlay_quotes(str(x)) for x in arr]
+        out = [x for x in out if x]
         # Model sometimes returns one combined line; pad so each timed segment has text.
         while len(out) < n:
-            out.append("Scene continues")
+            out.append("Keep watching")
         return out[:n]
     except Exception:
         return []
@@ -182,14 +224,16 @@ def generate_overlay_text(scene_description: str, *, api_key: str | None) -> lis
     # Fallback simple split if OpenAI is not configured
     if not api_key:
         words = scene_description.replace("_", " ").replace("-", " ").split()
-        first = " ".join(words[:8])
+        first = strip_overlay_quotes(" ".join(words[:8]))
         return [first[:70]] if first else []
 
     client = OpenAI(api_key=api_key)
     prompt = (
-        "You create short on-screen captions for a vertical video. "
+        "You write on-screen captions for a vertical YouTube Short. "
         "Given ONLY the text below (no images), return a JSON array of 1-3 lines (<= 50 chars each). "
-        "Each line must reflect concrete details from that text—no generic slogans or clichés unrelated to the description."
+        "Lines should help attract and retain viewers: hooks, curiosity, relatability, or a clear tease—"
+        "not bland scene summaries. Stay truthful to the text; do not invent events or claims the text does not support. "
+        "No hashtags, no emojis, no quotation marks in the lines. Vary tone across lines when you output more than one."
         f"\n\nText: {scene_description}"
     )
 
@@ -197,10 +241,13 @@ def generate_overlay_text(scene_description: str, *, api_key: str | None) -> lis
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Reply with valid JSON only. No markdown fences."},
+                {
+                    "role": "system",
+                    "content": "Reply with valid JSON only. No markdown fences. Captions optimized for Shorts engagement.",
+                },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.7,
+            temperature=0.75,
         )
         content = (resp.choices[0].message.content or "").strip()
         m = re.search(r"\[.*\]", content, re.S)
@@ -209,10 +256,12 @@ def generate_overlay_text(scene_description: str, *, api_key: str | None) -> lis
         if m:
             arr = json.loads(m.group())
             if isinstance(arr, list):
-                return [str(x).strip() for x in arr if str(x).strip()][:3]
+                lines = [strip_overlay_quotes(str(x)) for x in arr]
+                return [x for x in lines if x][:3]
     except Exception:
         pass
 
     # Ultimate fallback simple text
     words = scene_description.split()
-    return [" ".join(words[:8])][:1]
+    u = strip_overlay_quotes(" ".join(words[:8]))
+    return [u] if u else []
