@@ -142,6 +142,8 @@ def main() -> None:
             shutil.rmtree(work, ignore_errors=True)
 
         st.success("Export ready.")
+        st.subheader("Processed preview")
+        st.video(mp4_bytes, format="video/mp4")
         c1, c2 = st.columns(2)
         with c1:
             st.download_button(
