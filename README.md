@@ -28,10 +28,15 @@ cd ShortsAI-Studio
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 # macOS/Linux: source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 # Windows: copy .env.example .env
 # macOS/Linux: cp .env.example .env
 ```
+
+**Upgrade pip before `pip install -r requirements.txt`:** Fresh venvs on some systems ship with very old pip (for example 19.x). That can break installs (for example `tokenizers` / `pyproject.toml` errors). The **1. Setup environment** commands above already run `python -m pip install --upgrade pip setuptools wheel` before `pip install -r requirements.txt`.
+
+**Python 3.8 (not recommended):** The project targets **Python 3.10+**. If you still use **3.8**, `requirements.txt` includes a conditional line so `tokenizers` stays on a release that provides Windows wheels (`<0.21` when `python_version < "3.9"`). Upgrading pip first (above) is still required.
 
 **venv on Windows:** Creating `.venv` runs `ensurepip` (installing pip) and can sit with no output for a minute or two. Let it finish; pressing Ctrl+C raises `KeyboardInterrupt` and leaves a broken venv. If that happens, delete the `.venv` folder and run `python -m venv .venv` again. If it keeps failing, use `python -m venv .venv --without-pip`, then `.\.venv\Scripts\python.exe -m ensurepip --upgrade`.
 
@@ -55,6 +60,7 @@ Edit `.env` if you want:
 - **Whisper tuning:**
   - `SHORTSAI_WHISPER_MODEL` — default `base` (`tiny` is faster, `small` more accurate).
   - `SHORTSAI_WHISPER_DEVICE` / `SHORTSAI_WHISPER_COMPUTE` — e.g. `cuda` and `float16` if you have a GPU.
+- **ffmpeg not on PATH for Streamlit:** Set `SHORTSAI_FFMPEG_DIR` to the folder that contains **both** `ffmpeg` and `ffprobe` (on Windows, both `.exe`). This is useful right after `winget install Gyan.FFmpeg` when your IDE has not picked up the updated PATH yet—Winget often adds shims under `%LOCALAPPDATA%\Microsoft\WinGet\Links` (adjust the drive/username as needed). Alternatively set `FFMPEG_PATH` and `FFPROBE_PATH` to each executable. See `.env.example` for commented placeholders and [Fix ffmpeg Error](#fix-ffmpeg-error) below.
 
 **4. Run the app**
 
@@ -91,7 +97,7 @@ streamlit run app.py
 
 If you have ffmpeg installed elsewhere or `winget` didn't work:
 
-1. Find the folder containing `ffmpeg.exe` and `ffprobe.exe` (e.g., `C:\ffmpeg\bin`)
+1. Find the folder containing `ffmpeg.exe` and `ffprobe.exe` (e.g., `C:\ffmpeg\bin`, or after **winget** `Gyan.FFmpeg`, often `%LOCALAPPDATA%\Microsoft\WinGet\Links` on Windows—both shims live in that folder).
 2. Open `.env` and add:
    ```
    SHORTSAI_FFMPEG_DIR=C:\ffmpeg\bin
@@ -100,6 +106,10 @@ If you have ffmpeg installed elsewhere or `winget` didn't work:
    ```
    FFMPEG_PATH=C:\ffmpeg\bin\ffmpeg.exe
    FFPROBE_PATH=C:\ffmpeg\bin\ffprobe.exe
+   ```
+   Example using the typical WinGet shim directory (replace `YourUser` if needed):
+   ```
+   SHORTSAI_FFMPEG_DIR=C:\Users\YourUser\AppData\Local\Microsoft\WinGet\Links
    ```
 3. Save and restart Streamlit.
 

@@ -1,4 +1,6 @@
 streamlit>=1.28.0
+# tokenizers 0.21+ often resolves to sdist on Python 3.8 / Windows; use a wheel line (<0.21) before pip install -r.
+tokenizers>=0.13,<0.21; python_version < "3.9"
 faster-whisper>=1.0.0
 openai>=1.12.0
 python-dotenv>=1.0.0
