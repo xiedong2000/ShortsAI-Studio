@@ -74,6 +74,36 @@ The UI opens in your browser. Upload a clip (up to **60 seconds**) → get a **1
 
 **Text Overlays**: Optionally add on-screen text overlays including title, description, hashtags, and attribution directly on the video (perfect for YouTube Shorts).
 
+**5. CLI smoke test (`shorts_generator.py`, Day 1–2 MVP)**
+
+Same pipeline as the UI, for demos, scripts, or CI. From the project root, use the **venv** so dependencies (`python-dotenv`, `faster-whisper`, etc.) are available:
+
+```bash
+# Windows (PowerShell)
+.\.venv\Scripts\python.exe shorts_generator.py -i path\to\your_clip.mp4
+# Or: .\.venv\Scripts\activate   then   python shorts_generator.py ...
+```
+
+If you run plain `python` from a global install that never had `pip install -r requirements.txt`, you will see `ModuleNotFoundError` for `dotenv` or other packages—install into that Python or use `.venv` as above.
+
+Writes `<clip_stem>_shorts.mp4` and `<clip_stem>_shorts.json` next to the input (override with `-o` / `--metadata`). On success the script prints the two output paths (last two lines). `python shorts_generator.py --help` works even without deps (shows usage only).
+
+Common options (same interpreter as above, e.g. `.venv\Scripts\python.exe`):
+
+```bash
+.\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 -o out/demo.mp4 --music assets/music/some_track.mp3
+.\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --translate --language-hint zh
+.\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --keep-work-dir -q
+```
+
+`--keep-work-dir` leaves the temp folder in place and logs its path for debugging FFmpeg or Whisper issues. Set `OPENAI_API_KEY` in `.env` for GPT metadata and vision scene lines; otherwise the pipeline uses text fallbacks.
+
+**MVP checklist (one demo video):**
+
+1. `ffmpeg -version` and `ffprobe -version` succeed (or set `SHORTSAI_FFMPEG_DIR` / `FFMPEG_PATH` / `FFPROBE_PATH` in `.env`).
+2. Run `.\.venv\Scripts\python.exe shorts_generator.py -i your_clip.mp4` (clip under 60s, with audible speech if you want burned-in captions).
+3. Confirm: MP4 plays, captions visible (if speech was detected), optional `--music` if you pass a file, open the JSON for title/description/tags/transcript.
+
 ---
 
 ## Fix ffmpeg error
