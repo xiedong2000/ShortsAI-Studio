@@ -88,13 +88,23 @@ If you run plain `python` from a global install that never had `pip install -r r
 
 Writes `<clip_stem>_shorts.mp4` and `<clip_stem>_shorts.json` next to the input (override with `-o` / `--metadata`). On success the script prints the two output paths (last two lines). `python shorts_generator.py --help` works even without deps (shows usage only).
 
+List bundled library filenames (under `assets/music/`):
+
+```bash
+.\.venv\Scripts\python.exe shorts_generator.py --list-music
+```
+
 Common options (same interpreter as above, e.g. `.venv\Scripts\python.exe`):
 
 ```bash
-.\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 -o out/demo.mp4 --music assets/music/some_track.mp3
+.\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 -o out/demo.mp4 --music first
+.\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --music "Exact Track Name.mp3"
+.\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --music C:\path\to\track.mp3
 .\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --translate --language-hint zh
 .\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --keep-work-dir -q
 ```
+
+`--music first` picks the first sorted file in `assets/music/` (same idea as picking a track in the Streamlit dropdown).
 
 `--keep-work-dir` leaves the temp folder in place and logs its path for debugging FFmpeg or Whisper issues. Set `OPENAI_API_KEY` in `.env` for GPT metadata and vision scene lines; otherwise the pipeline uses text fallbacks.
 

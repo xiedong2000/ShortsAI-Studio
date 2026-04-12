@@ -15,6 +15,54 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+_MUSIC_EXTS = frozenset({".mp3", ".wav", ".m4a", ".aac", ".ogg"})
+
+
+def _music_library_dir() -> Path:
+    return ROOT / "assets" / "music"
+
+
+def _list_music_paths() -> list[Path]:
+    d = _music_library_dir()
+    if not d.is_dir():
+        return []
+    return sorted(
+        p for p in d.iterdir() if p.is_file() and p.suffix.lower() in _MUSIC_EXTS
+    )
+
+
+def _print_music_list() -> None:
+    paths = _list_music_paths()
+    print(f"Tracks under {_music_library_dir()}:", flush=True)
+    if not paths:
+        print("  (none — add .mp3 etc. from YouTube Audio Library)", flush=True)
+        return
+    for i, p in enumerate(paths):
+        print(f"  [{i}] {p.name}", flush=True)
+    print('Pass a path, or use --music first, or --music "ExactFileName.mp3"', flush=True)
+
+
+def _resolve_music_arg(raw: str | None) -> Path | None:
+    """Path to an audio file, keyword ``first`` (first sorted library track), or a basename under assets/music/."""
+    if raw is None or not str(raw).strip():
+        return None
+    s = str(raw).strip()
+    if s.lower() in ("first", "auto", "@first"):
+        paths = _list_music_paths()
+        if not paths:
+            raise ValueError(
+                "No music in assets/music/. Add .mp3 files or pass a full path: --music C:\\path\\track.mp3"
+            )
+        return paths[0].resolve()
+    p = Path(s).expanduser()
+    if p.is_file():
+        return p.resolve()
+    lib = _music_library_dir() / s
+    if lib.is_file():
+        return lib.resolve()
+    raise ValueError(
+        f"Music not found: {s!r}. Use --list-music, --music first, or a full path to an audio file."
+    )
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -25,8 +73,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-i",
         "--input",
         type=Path,
-        required=True,
-        help="Input video path (mp4, mov, webm, etc.; max 60s).",
+        default=None,
+        help="Input video path (mp4, mov, webm, etc.; max 60s). Required unless --list-music.",
     )
     p.add_argument(
         "-o",
@@ -43,9 +91,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--music",
-        type=Path,
+        type=str,
         default=None,
-        help="Optional background music file (e.g. from YouTube Audio Library).",
+        metavar="PATH_OR_FIRST",
+        help='Background music: path to .mp3/.wav, or keyword "first" (first file in assets/music/), '
+        'or a filename inside assets/music/ (see --list-music).',
+    )
+    p.add_argument(
+        "--list-music",
+        action="store_true",
+        help="List tracks in assets/music/ and exit (no -i needed).",
     )
     p.add_argument(
         "--music-volume",
@@ -87,7 +142,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Only print errors and the final output paths.",
     )
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if not args.list_music and args.input is None:
+        p.error("the following arguments are required: -i/--input")
+    return args
 
 
 def _log(msg: str, *, quiet: bool) -> None:
@@ -111,6 +169,10 @@ def _deps_help() -> str:
 def main(argv: list[str] | None = None) -> int:
     # Parse first so `python shorts_generator.py --help` works without project deps installed.
     args = _parse_args(argv)
+
+    if args.list_music:
+        _print_music_list()
+        return 0
 
     try:
         from dotenv import load_dotenv
@@ -149,12 +211,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     out_json.parent.mkdir(parents=True, exist_ok=True)
 
-    music_path: Path | None = None
-    if args.music is not None:
-        music_path = args.music.expanduser().resolve()
-        if not music_path.is_file():
-            print(f"error: music file not found: {music_path}", file=sys.stderr)
-            return 1
+    try:
+        music_path = _resolve_music_arg(args.music)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
 
     if args.translate:
         whisper_task: str | None = "translate"
@@ -212,6 +273,15 @@ def main(argv: list[str] | None = None) -> int:
             meta["music_file"] = music_path.name
         else:
             meta["music_file"] = None
+
+        if not meta.get("scene_overlay_applied"):
+            err = meta.get("scene_overlay_error", "")
+            extra = f" ({err})" if err else ""
+            print(
+                f"warning: timed scene text overlays were not burned in{extra}. "
+                "Check progress messages above or metadata scene_overlay_error.",
+                file=sys.stderr,
+            )
 
         out_mp4.write_bytes(mp4_bytes)
         out_json.write_bytes(metadata_to_json_bytes(meta))

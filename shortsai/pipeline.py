@@ -160,27 +160,38 @@ def _scale_and_subs(
     else:
         vf = base
 
-    ffmpeg_util.run_ffmpeg(
-        [
-            "-y",
-            "-i",
-            str(video_in.name),
-            "-vf",
-            vf,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "23",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            str(video_out.name),
-        ],
-        cwd=cwd,
-    )
+    src = cwd / video_in.name
+    has_audio = ffmpeg_util.has_audio_stream(src)
+    # Explicit stream maps: without -map 0:a, some ffmpeg builds drop audio when re-encoding video.
+    cmd: list[str] = [
+        "-y",
+        "-i",
+        str(video_in.name),
+        "-vf",
+        vf,
+        "-map",
+        "0:v:0",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "23",
+    ]
+    if has_audio:
+        cmd.extend(
+            [
+                "-map",
+                "0:a:0",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+            ]
+        )
+    cmd.append(str(video_out.name))
+
+    ffmpeg_util.run_ffmpeg(cmd, cwd=cwd)
 
 
 def _add_text_overlay(
@@ -232,25 +243,28 @@ def _add_text_overlay(
     vf = ",".join(vf_parts)
 
     progress_emit(f"FFmpeg overlay vf: {vf}")
-    ffmpeg_util.run_ffmpeg(
-        [
-            "-y",
-            "-i",
-            str(video_in.name),
-            "-vf",
-            vf,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "23",
-            "-c:a",
-            "copy",  # Keep original audio
-            str(video_out.name),
-        ],
-        cwd=cwd,
-    )
+    src = cwd / video_in.name
+    has_audio = ffmpeg_util.has_audio_stream(src)
+    cmd: list[str] = [
+        "-y",
+        "-i",
+        str(video_in.name),
+        "-vf",
+        vf,
+        "-map",
+        "0:v:0",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "23",
+    ]
+    if has_audio:
+        cmd.extend(["-map", "0:a:0", "-c:a", "copy"])  # keep speech / mixed audio as-is
+    cmd.append(str(video_out.name))
+
+    ffmpeg_util.run_ffmpeg(cmd, cwd=cwd)
 
 
 def _mix_music(
@@ -262,9 +276,16 @@ def _mix_music(
     cwd: Path,
 ) -> None:
     vol = max(0.0, min(1.0, music_volume))
-    filter_complex = (
-        f"[1:a]volume={vol}[m];[0:a][m]amix=inputs=2:duration=first:dropout_transition=2[a]"
-    )
+    v_src = cwd / video_in.name
+    has_speech = ffmpeg_util.has_audio_stream(v_src)
+    # amix requires two inputs; silent video still gets music under speech-style ducking path.
+    if has_speech:
+        filter_complex = (
+            f"[1:a]volume={vol}[m];[0:a][m]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+        )
+    else:
+        filter_complex = f"[1:a]volume={vol}[aout]"
+
     ffmpeg_util.run_ffmpeg(
         [
             "-y",
@@ -275,9 +296,9 @@ def _mix_music(
             "-filter_complex",
             filter_complex,
             "-map",
-            "0:v",
+            "0:v:0",
             "-map",
-            "[a]",
+            "[aout]",
             "-c:v",
             "copy",
             "-c:a",
@@ -496,6 +517,7 @@ def process_upload(
     overlay_texts = sanitize_overlay_lines(overlay_texts)
 
     meta["on_screen_overlay_lines"] = list(overlay_texts)
+    meta["scene_overlay_applied"] = False
 
     log(f"Applying scene text overlays… overlay_texts={overlay_texts}")
     try:
@@ -508,9 +530,11 @@ def process_upload(
             progress_emit=log,
         )
         final_video = overlay_video
+        meta["scene_overlay_applied"] = True
         log(f"Scene text overlays applied; lines={len(overlay_texts)}")
     except Exception as e:
         log(f"Warning: Scene text overlay failed ({str(e)[:300]}), continuing without overlays")
+        meta["scene_overlay_error"] = str(e)[:500]
 
     mp4_bytes = final_video.read_bytes()
     return mp4_bytes, meta
