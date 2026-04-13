@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -130,26 +131,34 @@ def probe_video_start_time_seconds(path: Path) -> float:
 
 
 def has_audio_stream(path: Path) -> bool:
-    """Check if video file has an audio stream."""
+    """True if the container has at least one audio stream (robust across ffprobe builds)."""
+    try:
+        if not path.is_file():
+            return False
+    except OSError:
+        return False
     _, ffprobe = ffmpeg_binaries()
     r = subprocess.run(
         [
             str(ffprobe),
             "-v",
             "error",
-            "-select_streams",
-            "a",
-            "-show_entries",
-            "stream=index",
+            "-show_streams",
             "-of",
-            "csv=p=0",
+            "json",
             str(path),
         ],
         capture_output=True,
         text=True,
         check=False,
     )
-    return r.returncode == 0 and r.stdout.strip() != ""
+    if r.returncode != 0:
+        return False
+    try:
+        data = json.loads(r.stdout or "{}")
+    except json.JSONDecodeError:
+        return False
+    return any(s.get("codec_type") == "audio" for s in data.get("streams", []))
 
 
 def extract_jpeg_frames_evenly(

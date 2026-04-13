@@ -154,23 +154,26 @@ def _scale_and_subs(
         if srt_path.exists() and srt_path.stat().st_size > 0:
             # Use just the filename for the subtitles filter (ffmpeg will look in cwd)
             # Avoid Windows path issues by not using absolute paths with backslashes
-            vf = f"{base},subtitles={srt_name}"
+            vf_inner = f"{base},subtitles={srt_name}"
         else:
-            vf = base  # No subtitles if file doesn't exist
+            vf_inner = base  # No subtitles if file doesn't exist
     else:
-        vf = base
+        vf_inner = base
+
+    # Only video through the filter graph; audio is mapped unchanged from input 0.
+    # Using -vf + -map 0:a together can yield silent MP4s on some Windows/ffmpeg builds.
+    filter_complex = f"[0:v]{vf_inner}[vout]"
 
     src = cwd / video_in.name
     has_audio = ffmpeg_util.has_audio_stream(src)
-    # Explicit stream maps: without -map 0:a, some ffmpeg builds drop audio when re-encoding video.
     cmd: list[str] = [
         "-y",
         "-i",
         str(video_in.name),
-        "-vf",
-        vf,
+        "-filter_complex",
+        filter_complex,
         "-map",
-        "0:v:0",
+        "[vout]",
         "-c:v",
         "libx264",
         "-preset",
@@ -240,19 +243,20 @@ def _add_text_overlay(
     vf_parts = [f"scale={SHORT_WIDTH}:{SHORT_HEIGHT}:force_original_aspect_ratio=decrease,pad={SHORT_WIDTH}:{SHORT_HEIGHT}:(ow-iw)/2:(oh-ih)/2"]
     vf_parts.extend(overlay_filters)
 
-    vf = ",".join(vf_parts)
+    vf_inner = ",".join(vf_parts)
+    filter_complex = f"[0:v]{vf_inner}[vout]"
 
-    progress_emit(f"FFmpeg overlay vf: {vf}")
+    progress_emit(f"FFmpeg overlay filter_complex: {filter_complex}")
     src = cwd / video_in.name
     has_audio = ffmpeg_util.has_audio_stream(src)
     cmd: list[str] = [
         "-y",
         "-i",
         str(video_in.name),
-        "-vf",
-        vf,
+        "-filter_complex",
+        filter_complex,
         "-map",
-        "0:v:0",
+        "[vout]",
         "-c:v",
         "libx264",
         "-preset",
