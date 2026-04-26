@@ -62,6 +62,7 @@ Edit `.env` if you want:
   - `SHORTSAI_WHISPER_TASK` — default `transcribe` (subtitles match the spoken language). Set to **`translate`** to get **English** subtitles and transcript when the audio is Chinese or any other language Whisper supports. In the Streamlit app you can choose this per export (**Subtitles & transcript**); the UI defaults match these env vars.
   - `SHORTSAI_WHISPER_LANGUAGE` — optional ISO 639-1 hint (e.g. `zh`) if auto-detection is wrong; leave unset for auto-detect. Also available in the app (optional text field); leave empty there for auto-detect (empty overrides `.env` for that run).
   - `SHORTSAI_WHISPER_DEVICE` / `SHORTSAI_WHISPER_COMPUTE` — e.g. `cuda` and `float16` if you have a GPU.
+  - `SHORTSAI_VERTICAL_FIT` — how landscape (or non-9:16) footage is placed in **1080×1920**: **`crop`** (default, center crop to fill the frame), **`letterbox`** (black bars, nothing cropped), or **`blur_fill`** (a blurred, zoomed copy of the frame fills the frame behind a letterboxed foreground). Blur mode uses FFmpeg’s `boxblur` filter (included in typical `ffmpeg` builds). The Streamlit app lists the same three choices under **Step 2 · Options**, with **Center crop** first.
 - **ffmpeg not on PATH for Streamlit:** Set `SHORTSAI_FFMPEG_DIR` to the folder that contains **both** `ffmpeg` and `ffprobe` (on Windows, both `.exe`). This is useful right after `winget install Gyan.FFmpeg` when your IDE has not picked up the updated PATH yet—Winget often adds shims under `%LOCALAPPDATA%\Microsoft\WinGet\Links` (adjust the drive/username as needed). Alternatively set `FFMPEG_PATH` and `FFPROBE_PATH` to each executable. See `.env.example` for commented placeholders and [Fix ffmpeg Error](#fix-ffmpeg-error) below.
 
 **4. Run the app**
@@ -101,8 +102,11 @@ Common options (same interpreter as above, e.g. `.venv\Scripts\python.exe`):
 .\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --music "Exact Track Name.mp3"
 .\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --music C:\path\to\track.mp3
 .\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --translate --language-hint zh
+.\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --vertical-fit blur_fill
 .\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --keep-work-dir -q
 ```
+
+`--vertical-fit` overrides `SHORTSAI_VERTICAL_FIT` for that run (`letterbox`, `crop`, or `blur_fill`). Omit it to use `.env` / default **crop**.
 
 `--music first` picks the first sorted file in `assets/music/` (same idea as picking a track in the Streamlit dropdown).
 

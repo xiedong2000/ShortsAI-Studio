@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 import os
-from typing import Any
+from typing import Any, cast
 import shutil
 import tempfile
 from pathlib import Path
@@ -15,6 +15,7 @@ from faster_whisper import WhisperModel
 from shortsai import ffmpeg_util
 from shortsai.pipeline import (
     MAX_DURATION_SEC,
+    VerticalFitMode,
     metadata_to_json_bytes,
     process_upload,
 )
@@ -36,6 +37,7 @@ _SS_MANUAL_OVERLAY = "manual_overlay"
 _SS_WHISPER_TASK = "whisper_task_ui"
 _SS_SPEECH_HINT = "speech_lang_hint"
 _SS_MUSIC_PICK = "music_file_pick"
+_SS_VERTICAL_FIT = "vertical_fit_ui"
 _CURRENT_STEP = "current_step"
 
 
@@ -126,8 +128,23 @@ def _init_session_defaults() -> None:
         st.session_state[_SS_SPEECH_HINT] = (os.environ.get("SHORTSAI_WHISPER_LANGUAGE") or "").strip()
     if _SS_MUSIC_PICK not in st.session_state:
         st.session_state[_SS_MUSIC_PICK] = "None"
+    if _SS_VERTICAL_FIT not in st.session_state:
+        st.session_state[_SS_VERTICAL_FIT] = _default_vertical_fit_from_env()
     if _CURRENT_STEP not in st.session_state:
         st.session_state[_CURRENT_STEP] = 1
+
+
+def _default_vertical_fit_from_env() -> str:
+    raw = (os.environ.get("SHORTSAI_VERTICAL_FIT") or "").strip().lower().replace("-", "_")
+    if not raw:
+        return "crop"
+    if raw in ("crop",):
+        return "crop"
+    if raw in ("blur_fill", "blurfill"):
+        return "blur_fill"
+    if raw in ("letterbox",):
+        return "letterbox"
+    return "crop"
 
 
 def _step_footer(step: int) -> None:
@@ -304,6 +321,18 @@ def main() -> None:
             key=_SS_MUSIC_VOL,
         )
 
+        st.radio(
+            "Vertical framing (9:16)",
+            options=("crop", "letterbox", "blur_fill"),
+            format_func=lambda v: {
+                "letterbox": "Letterbox — bars top/bottom or sides; entire frame visible",
+                "crop": "Center crop — fills 1080×1920; edges may be cut",
+                "blur_fill": "Blur fill — blurred full-frame backdrop behind the video",
+            }[v],
+            key=_SS_VERTICAL_FIT,
+            help="How wider or shorter clips are fitted. Blur fill uses FFmpeg’s boxblur filter.",
+        )
+
         st.text_input(
             "Optional: one line of on-screen scene text (replaces AI scene lines for this export)",
             help="Leave empty for auto-generated timed lines. Title/description/tags are not burned into the video.",
@@ -396,6 +425,7 @@ def main() -> None:
                         progress=on_progress,
                         whisper_task=st.session_state[_SS_WHISPER_TASK],
                         whisper_language_hint=(st.session_state.get(_SS_SPEECH_HINT) or "").strip() or None,
+                        vertical_fit=cast(VerticalFitMode, st.session_state[_SS_VERTICAL_FIT]),
                     )
                     if music_choice is not None:
                         meta["music_file"] = music_choice.name

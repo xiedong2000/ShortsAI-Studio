@@ -20,6 +20,7 @@ from shortsai.metadata_llm import (
 from shortsai.srt_build import words_to_srt
 from shortsai.transcribe import transcribe
 
+VerticalFitMode = Literal["letterbox", "crop", "blur_fill"]
 
 MAX_DURATION_SEC = 60.0
 SHORT_WIDTH = 1080
@@ -118,6 +119,20 @@ def _prepare_overlay_font_in_cwd(cwd: Path) -> str:
     return f":fontfile={_OVERLAY_FONT_LOCAL_NAME}"
 
 
+def _coerce_vertical_fit(raw: str | None) -> VerticalFitMode:
+    """Env / CLI: letterbox | crop | blur_fill (also blur-fill, blurfill). Default: crop."""
+    if not raw or not str(raw).strip():
+        return "crop"
+    x = str(raw).strip().lower().replace("-", "_")
+    if x in ("blur_fill", "blurfill"):
+        return "blur_fill"
+    if x == "crop":
+        return "crop"
+    if x == "letterbox":
+        return "letterbox"
+    return "crop"
+
+
 def _extract_audio(video: Path, wav_out: Path) -> None:
     ffmpeg_util.run_ffmpeg(
         [
@@ -142,27 +157,56 @@ def _scale_and_subs(
     *,
     cwd: Path,
     srt_name: str | None,
+    vertical_fit: VerticalFitMode = "crop",
 ) -> None:
-    base = (
-        f"scale={SHORT_WIDTH}:{SHORT_HEIGHT}:force_original_aspect_ratio=decrease,"
-        f"pad={SHORT_WIDTH}:{SHORT_HEIGHT}:(ow-iw)/2:(oh-ih)/2"
-    )
-
-    # Check if SRT file exists and has content before using subtitles filter
+    w, h = SHORT_WIDTH, SHORT_HEIGHT
+    use_subs = False
     if srt_name:
         srt_path = cwd / srt_name
-        if srt_path.exists() and srt_path.stat().st_size > 0:
-            # Use just the filename for the subtitles filter (ffmpeg will look in cwd)
-            # Avoid Windows path issues by not using absolute paths with backslashes
-            vf_inner = f"{base},subtitles={srt_name}"
-        else:
-            vf_inner = base  # No subtitles if file doesn't exist
+        use_subs = srt_path.exists() and srt_path.stat().st_size > 0
+
+    sub_clause = f",subtitles={srt_name}" if use_subs else ""
+
+    if vertical_fit == "letterbox":
+        inner = (
+            f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+            f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2{sub_clause}"
+        )
+        filter_complex = f"[0:v]{inner}[vout]"
+    elif vertical_fit == "crop":
+        inner = (
+            f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h}:(iw-ow)/2:(ih-oh)/2{sub_clause}"
+        )
+        filter_complex = f"[0:v]{inner}[vout]"
     else:
-        vf_inner = base
+        # Blurred full-frame background + letterboxed foreground (boxblur is in default lavfi builds).
+        bg = (
+            f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h}:(iw-ow)/2:(ih-oh)/2,boxblur=25:5"
+        )
+        fg = (
+            f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+            f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"
+        )
+        if use_subs:
+            filter_complex = (
+                f"[0:v]split=2[vb_in][fg_in];"
+                f"[vb_in]{bg}[bg];"
+                f"[fg_in]{fg}[fg];"
+                f"[bg][fg]overlay=0:0[vpre];"
+                f"[vpre]subtitles={srt_name}[vout]"
+            )
+        else:
+            filter_complex = (
+                f"[0:v]split=2[vb_in][fg_in];"
+                f"[vb_in]{bg}[bg];"
+                f"[fg_in]{fg}[fg];"
+                f"[bg][fg]overlay=0:0[vout]"
+            )
 
     # Only video through the filter graph; audio is mapped unchanged from input 0.
     # Using -vf + -map 0:a together can yield silent MP4s on some Windows/ffmpeg builds.
-    filter_complex = f"[0:v]{vf_inner}[vout]"
 
     src = cwd / video_in.name
     has_audio = ffmpeg_util.has_audio_stream(src)
@@ -239,11 +283,8 @@ def _add_text_overlay(
             f"x=(w-text_w)/2:y=(h-text_h)/2:{_drawtext_enable_between(pts0 + t0, pts0 + t1)}"
         )
 
-    # Build filter complex
-    vf_parts = [f"scale={SHORT_WIDTH}:{SHORT_HEIGHT}:force_original_aspect_ratio=decrease,pad={SHORT_WIDTH}:{SHORT_HEIGHT}:(ow-iw)/2:(oh-ih)/2"]
-    vf_parts.extend(overlay_filters)
-
-    vf_inner = ",".join(vf_parts)
+    # Input is already 9:16 from _scale_and_subs (music step copies video); only burn drawtext.
+    vf_inner = ",".join(overlay_filters)
     filter_complex = f"[0:v]{vf_inner}[vout]"
 
     progress_emit(f"FFmpeg overlay filter_complex: {filter_complex}")
@@ -331,13 +372,20 @@ def process_upload(
     progress: Callable[[str], None] | None = None,
     whisper_task: Literal["transcribe", "translate"] | None = None,
     whisper_language_hint: str | None = None,
+    vertical_fit: VerticalFitMode | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """
     Full pipeline: validate duration → transcribe → SRT → 9:16 + burn-in subs → optional music
     → metadata JSON (title/desc/tags) → timed scene text overlays on the export (not metadata fields).
     Returns (mp4_bytes, metadata_dict).
+
+    ``vertical_fit``: letterbox / crop / blur_fill; ``None`` uses env ``SHORTSAI_VERTICAL_FIT`` (default crop).
     """
     log = progress or (lambda _m: None)
+
+    resolved_vertical_fit: VerticalFitMode = (
+        vertical_fit if vertical_fit is not None else _coerce_vertical_fit(os.environ.get("SHORTSAI_VERTICAL_FIT"))
+    )
 
     ffmpeg_util.require_ffmpeg()
     dur = ffmpeg_util.probe_duration_seconds(input_video)
@@ -433,9 +481,19 @@ def process_upload(
     else:
         log("No SRT content generated (no words detected)")
 
-    log("Rendering vertical 9:16 video" + (" with captions…" if srt_name else "…"))
+    log(
+        "Rendering vertical 9:16 video"
+        + (f" ({resolved_vertical_fit})" if resolved_vertical_fit != "crop" else "")
+        + (" with captions…" if srt_name else "…")
+    )
     scaled = work_dir / "scaled_subs.mp4"
-    _scale_and_subs(local_in, scaled, cwd=work_dir, srt_name=srt_name)
+    _scale_and_subs(
+        local_in,
+        scaled,
+        cwd=work_dir,
+        srt_name=srt_name,
+        vertical_fit=resolved_vertical_fit,
+    )
 
     final_video = scaled
     if music_path is not None and music_path.is_file():
@@ -456,6 +514,7 @@ def process_upload(
     meta["visual_description"] = visual_fallback
     meta["language"] = tr.language
     meta["duration_seconds"] = round(dur, 2)
+    meta["vertical_fit"] = resolved_vertical_fit
 
     # On-screen lines: always scene-based (vision or text). Title/description/tags stay in metadata.json only.
     overlay_texts: list[str] = []

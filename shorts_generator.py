@@ -132,6 +132,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional single line of on-screen text (replaces AI scene lines).",
     )
     p.add_argument(
+        "--vertical-fit",
+        choices=("letterbox", "crop", "blur_fill"),
+        default=None,
+        help="How landscape clips fit 9:16 (default: env SHORTSAI_VERTICAL_FIT or crop).",
+    )
+    p.add_argument(
         "--keep-work-dir",
         action="store_true",
         help="Do not delete the temp work directory (prints its path for debugging).",
@@ -268,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
             progress=on_progress,
             whisper_task=whisper_task,
             whisper_language_hint=lang_hint,
+            vertical_fit=args.vertical_fit,
         )
         if music_path is not None:
             meta["music_file"] = music_path.name
