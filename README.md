@@ -1,5 +1,15 @@
 # ShortsAI-Studio
 
+<p align="center">
+  <a href="https://www.python.org/downloads/" title="Python"><img src="https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square" alt="Python" /></a>
+  <a href="https://platform.openai.com/docs/overview" title="OpenAI"><img src="https://img.shields.io/badge/OpenAI-API-10a37f?style=flat-square" alt="OpenAI" /></a>
+  <a href="https://streamlit.io/" title="Streamlit"><img src="https://img.shields.io/badge/Streamlit-UI-FF4B4B?style=flat-square" alt="Streamlit" /></a>
+  <a href="https://github.com/xiedong2000/ShortsAI-Studio/blob/main/LICENSE" title="License"><img src="https://img.shields.io/github/license/xiedong2000/ShortsAI-Studio?style=flat-square" alt="License" /></a>
+  <a href="https://github.com/xiedong2000/ShortsAI-Studio/commits/main/" title="Last commit"><img src="https://img.shields.io/github/last-commit/xiedong2000/ShortsAI-Studio?style=flat-square" alt="GitHub last commit" /></a>
+  <a href="https://github.com/xiedong2000/ShortsAI-Studio/issues" title="Issues"><img src="https://img.shields.io/github/issues/xiedong2000/ShortsAI-Studio?style=flat-square" alt="GitHub issues" /></a>
+  <a href="https://github.com/xiedong2000/ShortsAI-Studio/pulls" title="Pull requests"><img src="https://img.shields.io/github/issues-pr/xiedong2000/ShortsAI-Studio?style=flat-square" alt="GitHub pull requests" /></a>
+</p>
+
 Turn a short clip (≤ **60s**) into a **1080×1920** YouTube Shorts–style MP4: **burned-in captions** (Whisper), optional **background music**, **GPT title/description/tags**, and **timed on-screen scene lines**. Use the **Streamlit** wizard or the **`shorts_generator.py`** CLI—the same pipeline powers both.
 
 ---
