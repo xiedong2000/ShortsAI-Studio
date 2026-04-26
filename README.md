@@ -1,27 +1,44 @@
 # ShortsAI-Studio
 
-AI-powered YouTube Shorts generator that transforms short videos into engaging content with automatic captions, optional background music, and GPT-generated titles, descriptions, and hashtags.
+Turn a short clip (≤ **60s**) into a **1080×1920** YouTube Shorts–style MP4: **burned-in captions** (Whisper), optional **background music**, **GPT title/description/tags**, and **timed on-screen scene lines**. Use the **Streamlit** wizard or the **`shorts_generator.py`** CLI—the same pipeline powers both.
 
-## Background music: YouTube Audio Library
+---
 
-All bundled or suggested background tracks for this project should come from the **YouTube Audio Library** so licensing stays aligned with Shorts uploads and YouTube’s rules.
+## Screenshots
 
-1. Open [YouTube Studio](https://studio.youtube.com) → **Audio library** (Music tab).
-2. Download tracks you want (MP3 or other offered formats).
-3. Place files in `assets/music/` (see that folder’s README). The pipeline will mix them under speech with adjustable volume.
+**Step 1 · Upload** → **Step 2 · Options** → **Step 3 · Generate** → **Step 4 · Results**
 
-**Important:** Some tracks require **attribution** in the video description. The library shows requirements per track—copy the required credit into your generated metadata JSON or description before publishing.
+| ![Step 1 — Upload](docs/screenshots/01-upload.png) | ![Step 2 — Options](docs/screenshots/02-options.png) |
+|:---:|:---:|
+| **1 · Upload** | **2 · Options** |
 
-Do not use random “royalty-free” packs from unclear sources in the default workflow; stick to YouTube Audio Library unless you add a separate, explicitly licensed source later.
+| ![Step 3 — Generate](docs/screenshots/03-generate.png) | ![Step 4 — Results](docs/screenshots/04-results.png) |
+|:---:|:---:|
+| **3 · Generate** | **4 · Results** |
 
-## Quick start (v1)
+*The images above are **color placeholders** so the README never shows broken links. Replace them with real UI captures when you polish the repo—see [`docs/screenshots/README.md`](docs/screenshots/README.md).*
 
-**Prerequisites**
+---
 
-- Python 3.10+
-- [ffmpeg](https://ffmpeg.org/download.html): `ffmpeg` and `ffprobe` must be available (see [Fix ffmpeg Error](#fix-ffmpeg-error) if you encounter "Could not find ffmpeg and ffprobe" on first run).
+## Features
 
-**1. Setup environment**
+| Area | What you get |
+|------|----------------|
+| **Speech → text** | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) transcription; optional **translate-to-English** for subtitles + transcript |
+| **Captions** | Timed **SRT** → burned into the export (FFmpeg `subtitles`) |
+| **Vertical 9:16** | **Center crop** (default), **letterbox**, or **blur-fill** background (`boxblur` + overlay)—[`SHORTSAI_VERTICAL_FIT`](.env.example) or UI **Step 2** |
+| **Music** | Mix a track from `assets/music/` under speech (volume slider / CLI `--music-volume`) |
+| **Metadata** | JSON sidecar: title, description, tags, transcript, duration, `vertical_fit`, overlay source, etc. (`OPENAI_API_KEY` optional) |
+| **Scene text** | Short **red timed drawtext** lines on the video (vision + GPT when a key is set; otherwise text fallback) |
+| **Apps** | **Streamlit** (`app.py`): stepped flow, session **last export** (MP4 + meta). **CLI** (`shorts_generator.py`): same pipeline for demos, scripts, CI |
+
+---
+
+## Quick start
+
+**Prerequisites:** Python **3.10+**, **`ffmpeg`** + **`ffprobe`** on `PATH` (or set paths in `.env`—see [Fix ffmpeg Error](#fix-ffmpeg-error)).
+
+### 1. Clone, venv, dependencies
 
 ```bash
 cd ShortsAI-Studio
@@ -34,136 +51,95 @@ pip install -r requirements.txt
 # macOS/Linux: cp .env.example .env
 ```
 
-**Upgrade pip before `pip install -r requirements.txt`:** Fresh venvs on some systems ship with very old pip (for example 19.x). That can break installs (for example `tokenizers` / `pyproject.toml` errors). The **1. Setup environment** commands above already run `python -m pip install --upgrade pip setuptools wheel` before `pip install -r requirements.txt`.
+**Upgrade pip first** (above): very old venv pip can break installs (e.g. `tokenizers` / `pyproject.toml`). **Python 3.8** is not recommended; if you must use it, `requirements.txt` pins `tokenizers` for Windows wheels—still upgrade pip first. **Windows venv** can sit silent for a minute during `ensurepip`; do not Ctrl+C—if the venv breaks, delete `.venv` and recreate (see older README notes in git history if needed).
 
-**Python 3.8 (not recommended):** The project targets **Python 3.10+**. If you still use **3.8**, `requirements.txt` includes a conditional line so `tokenizers` stays on a release that provides Windows wheels (`<0.21` when `python_version < "3.9"`). Upgrading pip first (above) is still required.
+### 2. FFmpeg
 
-**venv on Windows:** Creating `.venv` runs `ensurepip` (installing pip) and can sit with no output for a minute or two. Let it finish; pressing Ctrl+C raises `KeyboardInterrupt` and leaves a broken venv. If that happens, delete the `.venv` folder and run `python -m venv .venv` again. If it keeps failing, use `python -m venv .venv --without-pip`, then `.\.venv\Scripts\python.exe -m ensurepip --upgrade`.
-
-**2. Install ffmpeg** (if not already installed)
-
-Check if ffmpeg is installed:
 ```bash
-ffmpeg -version
-ffprobe -version
+ffmpeg -version && ffprobe -version
 ```
 
-If not found, install it:
-- **Windows:** `winget install Gyan.FFmpeg`, then **close and reopen** your terminal to refresh PATH.
+- **Windows:** `winget install Gyan.FFmpeg` — then **restart the terminal** so `PATH` updates.
 - **macOS:** `brew install ffmpeg`
 - **Linux (Ubuntu):** `sudo apt-get install ffmpeg`
 
-**3. Configure (optional)**
+### 3. Configure (optional)
 
-Edit `.env` if you want:
-- **GPT metadata:** Add your `OPENAI_API_KEY`
-- **Whisper tuning:**
-  - `SHORTSAI_WHISPER_MODEL` — default `base` (`tiny` is faster, `small` more accurate).
-  - `SHORTSAI_WHISPER_TASK` — default `transcribe` (subtitles match the spoken language). Set to **`translate`** to get **English** subtitles and transcript when the audio is Chinese or any other language Whisper supports. In the Streamlit app you can choose this per export (**Subtitles & transcript**); the UI defaults match these env vars.
-  - `SHORTSAI_WHISPER_LANGUAGE` — optional ISO 639-1 hint (e.g. `zh`) if auto-detection is wrong; leave unset for auto-detect. Also available in the app (optional text field); leave empty there for auto-detect (empty overrides `.env` for that run).
-  - `SHORTSAI_WHISPER_DEVICE` / `SHORTSAI_WHISPER_COMPUTE` — e.g. `cuda` and `float16` if you have a GPU.
-  - `SHORTSAI_VERTICAL_FIT` — how landscape (or non-9:16) footage is placed in **1080×1920**: **`crop`** (default, center crop to fill the frame), **`letterbox`** (black bars, nothing cropped), or **`blur_fill`** (a blurred, zoomed copy of the frame fills the frame behind a letterboxed foreground). Blur mode uses FFmpeg’s `boxblur` filter (included in typical `ffmpeg` builds). The Streamlit app lists the same three choices under **Step 2 · Options**, with **Center crop** first.
-- **ffmpeg not on PATH for Streamlit:** Set `SHORTSAI_FFMPEG_DIR` to the folder that contains **both** `ffmpeg` and `ffprobe` (on Windows, both `.exe`). This is useful right after `winget install Gyan.FFmpeg` when your IDE has not picked up the updated PATH yet—Winget often adds shims under `%LOCALAPPDATA%\Microsoft\WinGet\Links` (adjust the drive/username as needed). Alternatively set `FFMPEG_PATH` and `FFPROBE_PATH` to each executable. See `.env.example` for commented placeholders and [Fix ffmpeg Error](#fix-ffmpeg-error) below.
+Edit `.env` from [`.env.example`](.env.example):
 
-**4. Run the app**
+- **`OPENAI_API_KEY`** — richer metadata + vision-based scene lines (optional; text fallbacks work without it).
+- **`SHORTSAI_WHISPER_MODEL`** — `tiny` … `large-v3` (default `base`).
+- **`SHORTSAI_WHISPER_TASK`** — `transcribe` vs **`translate`** (English subs for any speech).
+- **`SHORTSAI_WHISPER_LANGUAGE`** — ISO 639-1 hint if auto-detect fails.
+- **`SHORTSAI_WHISPER_DEVICE` / `SHORTSAI_WHISPER_COMPUTE`** — e.g. `cuda` + `float16`.
+- **`SHORTSAI_VERTICAL_FIT`** — `crop` (default) \| `letterbox` \| `blur_fill`.
+- **`SHORTSAI_FFMPEG_DIR`** or **`FFMPEG_PATH`** / **`FFPROBE_PATH`** — if Streamlit cannot find ffmpeg after install.
+
+### 4. Run Streamlit
 
 ```bash
 streamlit run app.py
 ```
 
-The UI opens in your browser. Upload a clip (up to **60 seconds**) → get a **1080×1920** MP4 with burned-in captions and a **metadata.json** (title, description, tags, transcript, etc.). Add `.mp3` files under `assets/music/` to mix a YouTube Audio Library track.
+Browser: **Upload** → **Options** (music, vertical framing, subtitles) → **Generate** → **Results** (download MP4 + JSON).
 
-**Text Overlays**: Optionally add on-screen text overlays including title, description, hashtags, and attribution directly on the video (perfect for YouTube Shorts).
-
-**5. CLI smoke test (`shorts_generator.py`, Day 1–2 MVP)**
-
-Same pipeline as the UI, for demos, scripts, or CI. From the project root, use the **venv** so dependencies (`python-dotenv`, `faster-whisper`, etc.) are available:
+### 5. Run the CLI (same pipeline)
 
 ```bash
-# Windows (PowerShell)
+# Windows (PowerShell) — use venv Python
 .\.venv\Scripts\python.exe shorts_generator.py -i path\to\your_clip.mp4
-# Or: .\.venv\Scripts\activate   then   python shorts_generator.py ...
 ```
 
-If you run plain `python` from a global install that never had `pip install -r requirements.txt`, you will see `ModuleNotFoundError` for `dotenv` or other packages—install into that Python or use `.venv` as above.
-
-Writes `<clip_stem>_shorts.mp4` and `<clip_stem>_shorts.json` next to the input (override with `-o` / `--metadata`). On success the script prints the two output paths (last two lines). `python shorts_generator.py --help` works even without deps (shows usage only).
-
-List bundled library filenames (under `assets/music/`):
+Outputs **`<stem>_shorts.mp4`** and **`<stem>_shorts.json`** next to the input (override with `-o` / `--metadata`). `python shorts_generator.py --help` parses without importing heavy deps (shows usage only).
 
 ```bash
 .\.venv\Scripts\python.exe shorts_generator.py --list-music
-```
-
-Common options (same interpreter as above, e.g. `.venv\Scripts\python.exe`):
-
-```bash
 .\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 -o out/demo.mp4 --music first
-.\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --music "Exact Track Name.mp3"
-.\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --music C:\path\to\track.mp3
 .\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --translate --language-hint zh
 .\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --vertical-fit blur_fill
 .\.venv\Scripts\python.exe shorts_generator.py -i clip.mp4 --keep-work-dir -q
 ```
 
-`--vertical-fit` overrides `SHORTSAI_VERTICAL_FIT` for that run (`letterbox`, `crop`, or `blur_fill`). Omit it to use `.env` / default **crop**.
+`--vertical-fit` overrides **`SHORTSAI_VERTICAL_FIT`** for that run. **`--music first`** uses the first sorted file in `assets/music/`.
 
-`--music first` picks the first sorted file in `assets/music/` (same idea as picking a track in the Streamlit dropdown).
+**One-shot checklist:** `ffmpeg`/`ffprobe` OK → run CLI or Streamlit on a clip under 60s → confirm MP4 + captions (if speech) + optional music + JSON metadata.
 
-`--keep-work-dir` leaves the temp folder in place and logs its path for debugging FFmpeg or Whisper issues. Set `OPENAI_API_KEY` in `.env` for GPT metadata and vision scene lines; otherwise the pipeline uses text fallbacks.
+---
 
-**MVP checklist (one demo video):**
+## Background music (YouTube Audio Library)
 
-1. `ffmpeg -version` and `ffprobe -version` succeed (or set `SHORTSAI_FFMPEG_DIR` / `FFMPEG_PATH` / `FFPROBE_PATH` in `.env`).
-2. Run `.\.venv\Scripts\python.exe shorts_generator.py -i your_clip.mp4` (clip under 60s, with audible speech if you want burned-in captions).
-3. Confirm: MP4 plays, captions visible (if speech was detected), optional `--music` if you pass a file, open the JSON for title/description/tags/transcript.
+Use tracks from the **[YouTube Studio Audio library](https://studio.youtube.com)** so licensing matches Shorts.
+
+1. YouTube Studio → **Audio library** → download (e.g. MP3).
+2. Put files in **`assets/music/`** (see that folder’s README).
+
+Some tracks need **attribution** in the description—copy the required credit into your published description or the generated JSON as needed.
 
 ---
 
 ## Fix ffmpeg error
 
-If you see: **"Could not find ffmpeg and ffprobe"** when running `streamlit run app.py`, use one of these solutions:
+If you see **"Could not find ffmpeg and ffprobe"** (common right after `winget install` before the IDE picks up `PATH`):
 
-### Option 1: Install ffmpeg globally (recommended)
+**Option A — restart terminal** after install, then `ffmpeg -version`.
 
-**Windows:**
-```bash
-winget install Gyan.FFmpeg
-# Then close terminal and reopen it (important!)
-ffmpeg -version  # verify
-ffprobe -version  # verify
+**Option B — `.env`** (folder must contain **both** binaries):
+
+```
+SHORTSAI_FFMPEG_DIR=C:\ffmpeg\bin
 ```
 
-Then restart Streamlit:
-```bash
-streamlit run app.py
-```
-
-### Option 2: Point to ffmpeg in `.env`
-
-If you have ffmpeg installed elsewhere or `winget` didn't work:
-
-1. Find the folder containing `ffmpeg.exe` and `ffprobe.exe` (e.g., `C:\ffmpeg\bin`, or after **winget** `Gyan.FFmpeg`, often `%LOCALAPPDATA%\Microsoft\WinGet\Links` on Windows—both shims live in that folder).
-2. Open `.env` and add:
-   ```
-   SHORTSAI_FFMPEG_DIR=C:\ffmpeg\bin
-   ```
-   Or set each explicitly:
-   ```
-   FFMPEG_PATH=C:\ffmpeg\bin\ffmpeg.exe
-   FFPROBE_PATH=C:\ffmpeg\bin\ffprobe.exe
-   ```
-   Example using the typical WinGet shim directory (replace `YourUser` if needed):
-   ```
-   SHORTSAI_FFMPEG_DIR=C:\Users\YourUser\AppData\Local\Microsoft\WinGet\Links
-   ```
-3. Save and restart Streamlit.
+Or per-executable: `FFMPEG_PATH`, `FFPROBE_PATH`. WinGet shims often live under  
+`%LOCALAPPDATA%\Microsoft\WinGet\Links` (both `.exe` there on many setups).
 
 ---
 
-## Planned pipeline (MVP)
+## Repo layout (high level)
 
-1. Upload short video (&lt; 60s).
-2. Transcribe speech → timed captions.
-3. Optional: mix a track from `assets/music/` (YouTube Audio Library downloads).
-4. Export vertical 9:16 MP4 + JSON sidecar (title, description, tags, attribution if required).
+| Path | Role |
+|------|------|
+| `app.py` | Streamlit UI |
+| `shorts_generator.py` | CLI entry |
+| `shortsai/pipeline.py` | End-to-end export |
+| `shortsai/ffmpeg_util.py` | ffmpeg/ffprobe helpers |
+| `assets/music/` | Optional background tracks |
