@@ -8,6 +8,8 @@ from typing import Any
 
 from openai import OpenAI
 
+from . import ffmpeg_util
+
 # Double quotes + guillemets: remove everywhere (model often wraps lines in "..." or „…").
 _OVERLAY_QUOTE_GLOBAL = frozenset(
     "\""
@@ -62,32 +64,18 @@ def _parse_json_object(raw: str) -> dict[str, Any]:
     return json.loads(m.group())
 
 
-def generate_metadata(transcript: str, *, api_key: str | None) -> dict[str, Any]:
-    if not api_key:
-        return _fallback_metadata(transcript)
+def _transcript_insufficient_for_topic(transcript: str) -> bool:
+    """True when input is empty, filename-only, or too short—LLMs tend to invent generic Shorts how-to."""
+    t = transcript.strip()
+    if not t:
+        return True
+    words = [w for w in re.split(r"\s+", t) if w]
+    if len(words) < 6 and len(t) < 50:
+        return True
+    return False
 
-    client = OpenAI(api_key=api_key)
-    prompt = (
-        "You help with YouTube Shorts. Given the spoken transcript, return ONE JSON object only, "
-        'with keys: title (string, under 70 chars, catchy), description (string, 1-3 short paragraphs, '
-        "SEO-friendly, no hashtag spam), tags (array of 5-10 short strings, no # prefix), "
-        'attribution (string, empty unless user provided music credit text). '
-        "Do not invent facts not implied by the transcript.\n\nTranscript:\n"
-    )
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Reply with valid JSON only. No markdown fences."},
-            {"role": "user", "content": prompt + transcript[:12000]},
-        ],
-        temperature=0.6,
-    )
-    content = (resp.choices[0].message.content or "").strip()
-    try:
-        data = _parse_json_object(content)
-    except (json.JSONDecodeError, ValueError):
-        return _fallback_metadata(transcript)
 
+def _metadata_dict_from_parsed(data: dict[str, Any], *, notes: str) -> dict[str, Any]:
     title = str(data.get("title", "")).strip() or "My Short"
     description = str(data.get("description", "")).strip()
     tags = data.get("tags")
@@ -95,14 +83,150 @@ def generate_metadata(transcript: str, *, api_key: str | None) -> dict[str, Any]
         tags = []
     tags = [str(x).strip().lstrip("#") for x in tags if str(x).strip()][:15]
     attribution = str(data.get("attribution", "") or "").strip()
-
     return {
         "title": title[:100],
         "description": description[:5000],
         "tags": tags or ["shorts", "youtubeshorts"],
         "attribution": attribution,
-        "notes": "",
+        "notes": notes,
     }
+
+
+def generate_metadata_from_video_frames(
+    video: Path,
+    work_dir: Path,
+    *,
+    hint: str,
+    api_key: str,
+) -> dict[str, Any] | None:
+    """
+    Title/description/tags from actual video frames when speech transcript is missing or useless.
+    """
+    prefix = "meta_vision"
+    try:
+        paths = ffmpeg_util.extract_jpeg_frames_evenly(
+            video, work_dir, max_frames=4, file_prefix=prefix
+        )
+        if not paths:
+            return None
+        client = OpenAI(api_key=api_key)
+        hint_s = (hint or "").strip()[:400]
+        header = (
+            "You write YouTube Shorts metadata (not on-screen captions). "
+            "These JPEGs are evenly spaced frames from ONE vertical Short. "
+            "Return ONE JSON object only with keys: title (string, under 70 chars), "
+            "description (string, 1-3 short paragraphs, no hashtag spam), "
+            "tags (array of 5-10 short strings, no # prefix), "
+            "attribution (string, empty unless a visible on-screen credit implies music attribution). "
+            "Describe what is actually shown or strongly implied (subject, setting, activity, mood). "
+            "Do NOT write generic tutorials about uploading to YouTube, Shorts SEO, 'maximize reach', "
+            "or 'content strategy' unless the frames literally show that topic. "
+            "If the clip is ambiguous, stay concrete about what you see rather than inventing a lesson."
+        )
+        if hint_s:
+            header += f" Optional extra hint (may be filename only—prefer the images): {hint_s}"
+
+        user_content: list[dict[str, Any]] = [{"type": "text", "text": header}]
+        for p in paths:
+            try:
+                raw = p.read_bytes()
+            except OSError:
+                continue
+            b64 = base64.standard_b64encode(raw).decode("ascii")
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"},
+                }
+            )
+        if sum(1 for x in user_content if x.get("type") == "image_url") == 0:
+            return None
+
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Reply with valid JSON only. No markdown fences.",
+                },
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.35,
+            max_tokens=700,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        try:
+            data = _parse_json_object(content)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        return _metadata_dict_from_parsed(
+            data, notes="Generated from video frames (speech transcript was missing or too short)."
+        )
+    except Exception:
+        return None
+    finally:
+        for fp in work_dir.glob(f"{prefix}_*.jpg"):
+            fp.unlink(missing_ok=True)
+
+
+def generate_metadata(
+    transcript: str,
+    *,
+    api_key: str | None,
+    video_path: Path | None = None,
+    work_dir: Path | None = None,
+) -> dict[str, Any]:
+    if not api_key:
+        out = _fallback_metadata(transcript)
+        out["metadata_source"] = "fallback_no_api_key"
+        return out
+
+    if _transcript_insufficient_for_topic(transcript):
+        if video_path and work_dir:
+            vision_meta = generate_metadata_from_video_frames(
+                video_path, work_dir, hint=transcript, api_key=api_key
+            )
+            if vision_meta is not None:
+                vision_meta["metadata_source"] = "vision_llm"
+                return vision_meta
+        out = _fallback_metadata(transcript)
+        out["metadata_source"] = "fallback_transcript_only"
+        return out
+
+    client = OpenAI(api_key=api_key)
+    prompt = (
+        "You write metadata for ONE YouTube Short. The block below is the spoken transcript (or a tiny "
+        "filename fallback if there was almost no speech). "
+        "Return ONE JSON object only, with keys: title (string, under 70 chars, catchy), "
+        "description (string, 1-3 short paragraphs, SEO-friendly, no hashtag spam), "
+        "tags (array of 5-10 short strings, no # prefix), "
+        "attribution (string, empty unless the transcript mentions music to credit). "
+        "Every topical claim MUST come from the transcript. "
+        "If the transcript is very short or looks like a filename, describe only what those words could "
+        "honestly mean—do NOT substitute a generic article about uploading Shorts, 'mastering' the platform, "
+        "reach, engagement, or content strategy. "
+        "Never write meta-tutorials about YouTube or Shorts unless the speaker is actually discussing that.\n\n"
+        "Transcript:\n"
+    )
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Reply with valid JSON only. No markdown fences."},
+            {"role": "user", "content": prompt + transcript[:12000]},
+        ],
+        temperature=0.45,
+    )
+    content = (resp.choices[0].message.content or "").strip()
+    try:
+        data = _parse_json_object(content)
+    except (json.JSONDecodeError, ValueError):
+        out = _fallback_metadata(transcript)
+        out["metadata_source"] = "fallback_parse_error"
+        return out
+
+    out = _metadata_dict_from_parsed(data, notes="")
+    out["metadata_source"] = "transcript_llm"
+    return out
 
 
 def generate_overlay_text_from_vision_segments(

@@ -520,10 +520,17 @@ def main() -> None:
                     mime="application/json",
                 )
 
+            st.caption(
+                "Copy the fields below into YouTube Studio → your short → **Details**. "
+                "They are generated from speech (or from video frames if there was little/no speech)—not from this tip line."
+            )
+            src = meta.get("metadata_source")
+            if isinstance(src, str) and src:
+                st.caption(f"Metadata source: `{src}`")
+
             st.markdown("##### Title")
             title = meta.get("title") or ""
             st.markdown(f"### {title}" if title else "_No title_")
-            st.caption("Paste into YouTube Studio → video details")
 
             st.markdown("##### Description")
             st.write(meta.get("description") or "")
