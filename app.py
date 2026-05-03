@@ -43,6 +43,139 @@ _SS_VISION_ONSCREEN_SUBS = "vision_onscreen_subs"
 _SS_VISION_ONSCREEN_EN = "vision_onscreen_en"
 _CURRENT_STEP = "current_step"
 
+WIZARD_STEP_LABELS = ["Upload", "Options", "Generate", "Results"]
+
+
+def _wizard_stepper_styles() -> str:
+    """Circle step buttons: Streamlit puts help= on the native title= attribute (machine token only)."""
+    return """
+<style>
+button[title^="shortsai_step_"] {
+  display: block !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
+.shortsai-bar-inline {
+  width: 100%;
+  height: 4px;
+  background: #e5e7eb;
+  border-radius: 2px;
+  margin-top: 0.85rem;
+}
+button[title^="shortsai_step_"][title$="_done"] {
+  border-radius: 50% !important;
+  width: 2.35rem !important;
+  height: 2.35rem !important;
+  min-width: 2.35rem !important;
+  min-height: 2.35rem !important;
+  max-width: 2.35rem !important;
+  max-height: 2.35rem !important;
+  padding: 0 !important;
+  font-weight: 800 !important;
+  font-size: 0.95rem !important;
+  background: #dcfce7 !important;
+  color: #166534 !important;
+  border: 2px solid #86efac !important;
+}
+button[title^="shortsai_step_"][title$="_current"] {
+  border-radius: 50% !important;
+  width: 2.35rem !important;
+  height: 2.35rem !important;
+  min-width: 2.35rem !important;
+  min-height: 2.35rem !important;
+  max-width: 2.35rem !important;
+  max-height: 2.35rem !important;
+  padding: 0 !important;
+  font-weight: 800 !important;
+  font-size: 0.95rem !important;
+  background: #2563eb !important;
+  color: #fff !important;
+  border: 2px solid #1d4ed8 !important;
+  box-shadow: 0 2px 10px rgba(37, 99, 235, 0.35) !important;
+}
+button[title^="shortsai_step_"][title$="_todo"] {
+  border-radius: 50% !important;
+  width: 2.35rem !important;
+  height: 2.35rem !important;
+  min-width: 2.35rem !important;
+  min-height: 2.35rem !important;
+  max-width: 2.35rem !important;
+  max-height: 2.35rem !important;
+  padding: 0 !important;
+  font-weight: 700 !important;
+  font-size: 0.95rem !important;
+  background: #f9fafb !important;
+  color: #9ca3af !important;
+  border: 2px solid #e5e7eb !important;
+}
+.shortsai-step-wrap { max-width: 28rem; margin: 0 auto 0.35rem auto; }
+.shortsai-step-meta { text-align: center; color: #6b7280; font-size: 0.85rem; margin-top: 0.35rem; }
+.shortsai-step-title { text-align: center; font-size: 1.35rem; font-weight: 700; margin: 0.1rem 0 0.75rem 0; color: #111827; }
+</style>
+"""
+
+
+def _inject_scroll_top_fab(current_step: int) -> None:
+    """Fixed-position control: scroll to #shortsai-page-top (same approach as step anchors)."""
+    cs = max(1, min(4, int(current_step)))
+    components.html(
+        f"""
+<script>
+(function () {{
+  function scrollToTopAnchor() {{
+    const ids = ["shortsai-page-top"];
+    const roots = [window.parent.document, document];
+    for (const doc of roots) {{
+      if (!doc) continue;
+      for (const id of ids) {{
+        const el = doc.getElementById(id);
+        if (el) {{
+          try {{
+            el.scrollIntoView({{ behavior: "smooth", block: "start" }});
+            return true;
+          }} catch (err) {{}}
+        }}
+      }}
+    }}
+    return false;
+  }}
+  function mount(hostDoc) {{
+    if (!hostDoc || !hostDoc.body) return;
+    const id = 'shortsai-scroll-top-fab';
+    const old = hostDoc.getElementById(id);
+    if (old) old.remove();
+    const wrap = hostDoc.createElement('div');
+    wrap.id = id;
+    wrap.style.cssText =
+      'position:fixed;bottom:calc(1.1rem + env(safe-area-inset-bottom,0px));right:1rem;z-index:999999;font-family:system-ui,-apple-system,sans-serif;';
+    const btn = hostDoc.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute('aria-label', 'Scroll to top; current step {cs}');
+    btn.style.cssText =
+      'width:3.35rem;height:3.35rem;border-radius:50%;border:none;background:#2563eb;color:#fff;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(37,99,235,0.45);display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1;padding:0.2rem 0 0.15rem 0;gap:1px;';
+    btn.innerHTML = '<span style="font-size:1.05rem;line-height:1;">↑</span><span style="font-size:0.95rem;line-height:1;">{cs}</span>';
+    btn.addEventListener('click', function (e) {{
+      e.preventDefault();
+      if (!scrollToTopAnchor()) {{
+        try {{ window.parent.scrollTo({{ top: 0, behavior: "smooth" }}); }} catch (e2) {{}}
+        try {{ window.scrollTo({{ top: 0, behavior: "smooth" }}); }} catch (e3) {{}}
+      }}
+    }});
+    wrap.appendChild(btn);
+    hostDoc.body.appendChild(wrap);
+  }}
+  try {{
+    mount(window.parent.document);
+  }} catch (e) {{
+    mount(document);
+  }}
+}})();
+</script>
+""",
+        height=0,
+        width=0,
+    )
+
 
 @st.cache_resource
 def _whisper_model() -> WhisperModel:
@@ -101,8 +234,9 @@ def _step_nav_sidebar() -> None:
         )
         st.divider()
         st.caption(
-            "The **highlighted** (primary) step at the top of the page is the current step. Use **Back / Next** "
-            "under each section, or tap a step number. **☰** opens this panel on mobile."
+            "At the top of the page: **✓** = steps before the current one; **blue circle** = where you are. "
+            "Tap a step to jump. The **↑** button (bottom-right) scrolls to the top and shows the step number. "
+            "**☰** opens this panel on mobile."
         )
 
 
@@ -175,77 +309,49 @@ def _step_footer(step: int) -> None:
 
 
 def _wizard_jump_bar() -> None:
-    """Numbered step buttons (primary = current step). Styled as circles via title-scoped CSS."""
+    """Demo-style step rail: Streamlit buttons (no full page load); circles via title-scoped CSS."""
     cur = max(1, min(4, int(st.session_state.get(_CURRENT_STEP, 1))))
     st.session_state[_CURRENT_STEP] = cur
 
-    st.markdown("##### Steps")
-    st.caption(
-        "The **filled** step button (primary color) is the current step. Tap a number to jump there, "
-        "or use **← Back** / **Next →** under each section."
-    )
-    # Streamlit puts `help=` on the button as `title=` — scope circles to those four only (not Back/Next).
+    st.markdown(_wizard_stepper_styles(), unsafe_allow_html=True)
+    _, mid, _ = st.columns([1, 5, 1])
+    with mid:
+        cols = st.columns([1, 0.4, 1, 0.4, 1, 0.4, 1])
+        for idx in range(4):
+            step = idx + 1
+            role = "done" if step < cur else "current" if step == cur else "todo"
+            label = "✓" if role == "done" else str(step)
+            btype = "primary" if role == "current" else "secondary"
+            # `help` becomes `title=`; keep value exactly `shortsai_step_{n}_{role}` for CSS selectors.
+            hint = f"shortsai_step_{step}_{role}"
+            with cols[idx * 2]:
+                if st.button(
+                    label,
+                    key=f"wiz_step_{step}",
+                    type=btype,
+                    use_container_width=False,
+                    help=hint,
+                ):
+                    st.session_state[_CURRENT_STEP] = step
+                    st.session_state[_SCROLL_PENDING] = step
+                    st.rerun()
+            if idx < 3:
+                with cols[idx * 2 + 1]:
+                    st.markdown('<div class="shortsai-bar-inline"></div>', unsafe_allow_html=True)
+
     st.markdown(
-        """
-<style>
-button[title='Go to upload'],
-button[title='Music & captions'],
-button[title='Preview & generate'],
-button[title='Downloads & metadata'] {
-  border-radius: 50% !important;
-  width: 2.75rem !important;
-  height: 2.75rem !important;
-  min-width: 2.75rem !important;
-  min-height: 2.75rem !important;
-  max-width: 2.75rem !important;
-  max-height: 2.75rem !important;
-  padding: 0 !important;
-  font-weight: 700 !important;
-  font-size: 1.05rem !important;
-  margin-left: auto !important;
-  margin-right: auto !important;
-  display: block !important;
-}
-button[title='Go to upload'][data-testid='baseButton-secondary'],
-button[title='Music & captions'][data-testid='baseButton-secondary'],
-button[title='Preview & generate'][data-testid='baseButton-secondary'],
-button[title='Downloads & metadata'][data-testid='baseButton-secondary'] {
-  background: #f3f4f6 !important;
-  border: 2px solid #e5e7eb !important;
-  color: #6b7280 !important;
-}
-div[data-testid='stHorizontalBlock']:has(button[title='Go to upload']) div[data-testid='column'] {
-  display: flex !important;
-  justify-content: center !important;
-}
-</style>
-""",
+        f'<div class="shortsai-step-wrap">'
+        f'<div class="shortsai-step-meta">Step {cur} of 4</div>'
+        f'<div class="shortsai-step-title">{WIZARD_STEP_LABELS[cur - 1]}</div></div>',
         unsafe_allow_html=True,
     )
-
-    w1, w2, w3, w4 = st.columns(4)
-    labels = ["Upload", "Options", "Generate", "Results"]
-    hints = [
-        "Go to upload",
-        "Music & captions",
-        "Preview & generate",
-        "Downloads & metadata",
-    ]
-    for i, col in enumerate([w1, w2, w3, w4], start=1):
-        with col:
-            if st.button(
-                str(i),
-                key=f"wiz_circ_{i}",
-                use_container_width=False,
-                type="primary" if cur == i else "secondary",
-                help=hints[i - 1],
-            ):
-                st.session_state[_CURRENT_STEP] = i
-                st.session_state[_SCROLL_PENDING] = i
-                st.rerun()
+    st.caption(
+        "Tap a **step circle** above to jump (same page). **← Back** / **Next →** under each section still work. "
+        "Use the **↑** floating button (bottom-right) to scroll back to the top."
+    )
 
     l1, l2, l3, l4 = st.columns(4)
-    for col, lbl in zip([l1, l2, l3, l4], labels):
+    for col, lbl in zip([l1, l2, l3, l4], WIZARD_STEP_LABELS):
         with col:
             st.caption(lbl)
 
@@ -263,12 +369,17 @@ def main() -> None:
     _init_session_defaults()
 
     st.title("ShortsAI Studio")
+    st.markdown(
+        '<div id="shortsai-page-top" style="scroll-margin-top:4.5rem;height:1px;width:100%;margin:0;padding:0;"></div>',
+        unsafe_allow_html=True,
+    )
     st.caption(
         "Turn a clip into a vertical Short: burned-in speech captions, optional music, scene text overlays, "
         "and YouTube-ready title, description, and tags."
     )
     st.caption(
-        "Follow the steps below. The **highlighted** numbered button (primary) at the top matches your current step."
+        "Follow the steps below. The **top step bar** shows progress (✓ done, blue = current); "
+        "the **↑** control at the bottom-right jumps to the top and shows your step number."
     )
 
     _step_nav_sidebar()
@@ -697,6 +808,9 @@ def main() -> None:
     pending = st.session_state.pop(_SCROLL_PENDING, None)
     if pending is not None:
         _scroll_to_step_after_render(int(pending))
+
+    cur_step = max(1, min(4, int(st.session_state.get(_CURRENT_STEP, 1))))
+    _inject_scroll_top_fab(cur_step)
 
 
 if __name__ == "__main__":
