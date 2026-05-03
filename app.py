@@ -39,6 +39,8 @@ _SS_SPEECH_HINT = "speech_lang_hint"
 _SS_MUSIC_PICK = "music_file_pick"
 _SS_VERTICAL_FIT = "vertical_fit_ui"
 _SS_WHISPER_CACHE = "whisper_word_cache"
+_SS_VISION_ONSCREEN_SUBS = "vision_onscreen_subs"
+_SS_VISION_ONSCREEN_EN = "vision_onscreen_en"
 _CURRENT_STEP = "current_step"
 
 
@@ -99,8 +101,8 @@ def _step_nav_sidebar() -> None:
         )
         st.divider()
         st.caption(
-            "The **filled circle** is the current step. Use **Back / Next** at the bottom of each section, "
-            "or tap the circles. **☰** opens this panel on mobile."
+            "The **highlighted** (primary) step at the top of the page is the current step. Use **Back / Next** "
+            "under each section, or tap a step number. **☰** opens this panel on mobile."
         )
 
 
@@ -133,6 +135,10 @@ def _init_session_defaults() -> None:
         st.session_state[_SS_VERTICAL_FIT] = _default_vertical_fit_from_env()
     if _SS_WHISPER_CACHE not in st.session_state:
         st.session_state[_SS_WHISPER_CACHE] = None
+    if _SS_VISION_ONSCREEN_SUBS not in st.session_state:
+        st.session_state[_SS_VISION_ONSCREEN_SUBS] = False
+    if _SS_VISION_ONSCREEN_EN not in st.session_state:
+        st.session_state[_SS_VISION_ONSCREEN_EN] = False
     if _CURRENT_STEP not in st.session_state:
         st.session_state[_CURRENT_STEP] = 1
 
@@ -169,32 +175,48 @@ def _step_footer(step: int) -> None:
 
 
 def _wizard_jump_bar() -> None:
-    """Numbered circles: primary style = current step (filled); secondary = other steps (outline)."""
+    """Numbered step buttons (primary = current step). Styled as circles via title-scoped CSS."""
     cur = max(1, min(4, int(st.session_state.get(_CURRENT_STEP, 1))))
     st.session_state[_CURRENT_STEP] = cur
 
     st.markdown("##### Steps")
     st.caption(
-        "The **filled** circle is the current step. Tap any circle to go there, or use **← Back** / **Next →** under each section."
+        "The **filled** step button (primary color) is the current step. Tap a number to jump there, "
+        "or use **← Back** / **Next →** under each section."
     )
-    # Only the first horizontal block on the main canvas should be circular (wizard), not Back/Next rows.
+    # Streamlit puts `help=` on the button as `title=` — scope circles to those four only (not Back/Next).
     st.markdown(
         """
 <style>
-section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid="column"] button {
+button[title='Go to upload'],
+button[title='Music & captions'],
+button[title='Preview & generate'],
+button[title='Downloads & metadata'] {
   border-radius: 50% !important;
   width: 2.75rem !important;
   height: 2.75rem !important;
+  min-width: 2.75rem !important;
   min-height: 2.75rem !important;
+  max-width: 2.75rem !important;
+  max-height: 2.75rem !important;
   padding: 0 !important;
   font-weight: 700 !important;
   font-size: 1.05rem !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  display: block !important;
 }
-/* Softer inactive (secondary) circles — Streamlit uses data-testid on buttons */
-section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid="column"] button[data-testid="baseButton-secondary"] {
+button[title='Go to upload'][data-testid='baseButton-secondary'],
+button[title='Music & captions'][data-testid='baseButton-secondary'],
+button[title='Preview & generate'][data-testid='baseButton-secondary'],
+button[title='Downloads & metadata'][data-testid='baseButton-secondary'] {
   background: #f3f4f6 !important;
   border: 2px solid #e5e7eb !important;
   color: #6b7280 !important;
+}
+div[data-testid='stHorizontalBlock']:has(button[title='Go to upload']) div[data-testid='column'] {
+  display: flex !important;
+  justify-content: center !important;
 }
 </style>
 """,
@@ -214,7 +236,7 @@ section.main div[data-testid="stHorizontalBlock"]:first-of-type div[data-testid=
             if st.button(
                 str(i),
                 key=f"wiz_circ_{i}",
-                use_container_width=True,
+                use_container_width=False,
                 type="primary" if cur == i else "secondary",
                 help=hints[i - 1],
             ):
@@ -245,7 +267,9 @@ def main() -> None:
         "Turn a clip into a vertical Short: burned-in speech captions, optional music, scene text overlays, "
         "and YouTube-ready title, description, and tags."
     )
-    st.caption("Follow the steps below. The **highlighted circle** matches your current step.")
+    st.caption(
+        "Follow the steps below. The **highlighted** numbered button (primary) at the top matches your current step."
+    )
 
     _step_nav_sidebar()
 
@@ -360,8 +384,21 @@ def main() -> None:
             "Optional speech language hint (ISO 639-1, e.g. zh, ja). Empty = auto-detect.",
             key=_SS_SPEECH_HINT,
         )
+        st.checkbox(
+            "Music / little speech: build burned-in captions from on-screen text (OpenAI vision; needs API key)",
+            key=_SS_VISION_ONSCREEN_SUBS,
+            help="When Whisper finds no or very few words, read visible lyrics/titles from the source video and "
+            "burn them as timed captions. Does not replace the red AI scene lines.",
+        )
+        st.checkbox(
+            "Use English for those vision captions (translate if on-screen text is not English)",
+            key=_SS_VISION_ONSCREEN_EN,
+            disabled=not bool(st.session_state.get(_SS_VISION_ONSCREEN_SUBS)),
+            help="Runs a second API step (text-only) so captions are English—vision alone often copies Chinese from the video.",
+        )
         st.caption(
-            "Burned-in speech caption size: set SHORTSAI_CAPTION_FONT_SIZE in .env (default 14; try 12 for smaller text)."
+            "Red AI scene line size: set SHORTSAI_SCENE_OVERLAY_FONT_SIZE in .env (default 64; about 36–100). "
+            "Speech subtitle size is separate: SHORTSAI_CAPTION_FONT_SIZE (default 14)."
         )
         _step_footer(2)
 
@@ -432,6 +469,8 @@ def main() -> None:
                         whisper_task=st.session_state[_SS_WHISPER_TASK],
                         whisper_language_hint=(st.session_state.get(_SS_SPEECH_HINT) or "").strip() or None,
                         vertical_fit=cast(VerticalFitMode, st.session_state[_SS_VERTICAL_FIT]),
+                        vision_onscreen_subtitles=bool(st.session_state.get(_SS_VISION_ONSCREEN_SUBS)),
+                        vision_onscreen_subtitles_english=bool(st.session_state.get(_SS_VISION_ONSCREEN_EN)),
                     )
                     if music_choice is not None:
                         meta["music_file"] = music_choice.name
@@ -594,6 +633,12 @@ def main() -> None:
                                         vertical_fit=cast(VerticalFitMode, st.session_state[_SS_VERTICAL_FIT]),
                                         caption_srt_override=edited_srt.strip(),
                                         reuse_whisper_cache=cache,
+                                        vision_onscreen_subtitles=bool(
+                                            st.session_state.get(_SS_VISION_ONSCREEN_SUBS)
+                                        ),
+                                        vision_onscreen_subtitles_english=bool(
+                                            st.session_state.get(_SS_VISION_ONSCREEN_EN)
+                                        ),
                                     )
                                 if music_re is not None:
                                     meta2["music_file"] = music_re.name
@@ -616,6 +661,9 @@ def main() -> None:
             src = meta.get("metadata_source")
             if isinstance(src, str) and src:
                 st.caption(f"Metadata source: `{src}`")
+            bsrc = meta.get("burned_subtitle_source")
+            if isinstance(bsrc, str) and bsrc:
+                st.caption(f"Burned-in speech caption source: `{bsrc}`")
 
             st.markdown("##### Title")
             title = meta.get("title") or ""

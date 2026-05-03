@@ -13,6 +13,7 @@ from shortsai import ffmpeg_util
 from shortsai.metadata_llm import (
     _transcript_insufficient_for_topic,
     generate_metadata,
+    generate_onscreen_subtitle_srt_from_segments,
     generate_overlay_text,
     generate_overlay_text_from_vision_segments,
     sanitize_overlay_lines,
@@ -30,12 +31,86 @@ SHORT_HEIGHT = 1920
 # Copied into work_dir so drawtext can use fontfile=name.ttf (no Windows drive colons in -vf).
 _OVERLAY_FONT_LOCAL_NAME = "shortsai_overlay.ttf"
 
-# Scene overlay (drawtext): bold face via TTF, red fill, shadow + thin outline for contrast.
-_OVERLAY_DRAWTEXT_STYLE = (
-    "fontcolor=0xFF0000:fontsize=44:"
-    "borderw=2:bordercolor=black@0.85:"
-    "shadowcolor=black@0.75:shadowx=4:shadowy=4"
-)
+def _scene_overlay_font_size_from_env() -> int:
+    """drawtext fontsize for red timed AI scene lines (SHORTSAI_SCENE_OVERLAY_FONT_SIZE; not speech subtitles)."""
+    raw = (os.environ.get("SHORTSAI_SCENE_OVERLAY_FONT_SIZE") or "64").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 64
+    return max(36, min(100, n))
+
+
+def _scene_overlay_drawtext_style() -> str:
+    fs = _scene_overlay_font_size_from_env()
+    bw = max(2, min(4, fs // 18))
+    sh = max(3, min(6, fs // 12))
+    return (
+        f"fontcolor=0xFF0000:fontsize={fs}:"
+        f"borderw={bw}:bordercolor=black@0.85:"
+        f"shadowcolor=black@0.75:shadowx={sh}:shadowy={sh}"
+    )
+
+
+def _split_long_tokens(words: list[str], max_chars: int) -> list[str]:
+    """Break tokens longer than max_chars so word-wrap can place them."""
+    out: list[str] = []
+    for w in words:
+        if len(w) <= max_chars:
+            out.append(w)
+        else:
+            for i in range(0, len(w), max_chars):
+                out.append(w[i : i + max_chars])
+    return out
+
+
+def _wrap_scene_overlay_line(
+    text: str,
+    *,
+    video_width: int,
+    fontsize: int,
+    max_lines: int = 2,
+    margin_px: int = 96,
+) -> str:
+    """
+    Word-wrap for FFmpeg drawtext so large red scene labels fit 9:16 width (center crop safe).
+    Returns up to ``max_lines`` lines separated by newlines (UTF-8 textfile for drawtext).
+    """
+    text = text.strip()
+    if not text:
+        return text
+    usable = max(120, int(video_width) - margin_px)
+    # Conservative glyph width so Latin/CJK mix rarely clips horizontally.
+    approx_cw = max(float(fontsize) * 0.5, 10.0)
+    max_chars = max(6, int(usable / approx_cw))
+
+    words = _split_long_tokens(text.split(), max_chars)
+    if not words:
+        return text
+
+    wrapped_rows: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    for w in words:
+        add = len(w) + (1 if cur else 0)
+        if cur and cur_len + add > max_chars:
+            wrapped_rows.append(" ".join(cur))
+            cur = [w]
+            cur_len = len(w)
+        else:
+            cur.append(w)
+            cur_len += add
+    if cur:
+        wrapped_rows.append(" ".join(cur))
+
+    if len(wrapped_rows) <= max_lines:
+        return "\n".join(wrapped_rows)
+
+    head = "\n".join(wrapped_rows[: max_lines - 1])
+    tail = " ".join(wrapped_rows[max_lines - 1 :]).strip()
+    if len(tail) > max_chars:
+        tail = tail[: max_chars - 1].rstrip() + "\u2026"
+    return f"{head}\n{tail}"
 
 
 def _drawtext_enable_between(t_start: float, t_end: float) -> str:
@@ -135,7 +210,7 @@ def _coerce_vertical_fit(raw: str | None) -> VerticalFitMode:
 
 
 def _caption_font_size_from_env() -> int:
-    """ASS FontSize for burned-in speech subtitles (libass default can look large on 1080×1920)."""
+    """ASS FontSize for burned-in speech subtitles only (SHORTSAI_CAPTION_FONT_SIZE, default 14)."""
     raw = (os.environ.get("SHORTSAI_CAPTION_FONT_SIZE") or "14").strip()
     try:
         n = int(raw)
@@ -328,10 +403,9 @@ def _add_text_overlay(
     pts0 = ffmpeg_util.probe_video_start_time_seconds(video_in)
     font_clause = _prepare_overlay_font_in_cwd(cwd)
 
-    # Helper to escape text for drawtext filter
-    def escape_text(text: str) -> str:
-        # Commas separate filters in -vf; escape so text like "a, b" stays inside drawtext.
-        text = text.replace("\\", "\\\\")
+    def escape_drawtext_line(s: str) -> str:
+        """Escape user/AI text for drawtext=text=\"...\" inside -filter_complex (no newlines)."""
+        text = s.replace("\\", "\\\\")
         text = text.replace(",", "\\,")
         text = text.replace("'", "`")
         text = text.replace('"', '\\"')
@@ -339,17 +413,44 @@ def _add_text_overlay(
         text = text.replace(":", "\\:")
         text = text.replace("[", "\\[")
         text = text.replace("]", "\\]")
+        text = text.replace("\n", " ")
         return text
 
+    fs_overlay = _scene_overlay_font_size_from_env()
+    style = _scene_overlay_drawtext_style()
     overlay_filters: list[str] = []
     n_lines = len(lines)
     for idx, text_content in enumerate(lines):
-        esc_text = escape_text(text_content)
-        t0, t1 = _overlay_text_segment_window(idx, n_lines, duration_sec)
-        overlay_filters.append(
-            f'drawtext=text="{esc_text}"{font_clause}:{_OVERLAY_DRAWTEXT_STYLE}:'
-            f"x=(w-text_w)/2:y=(h-text_h)/2:{_drawtext_enable_between(pts0 + t0, pts0 + t1)}"
+        wrapped = _wrap_scene_overlay_line(
+            text_content,
+            video_width=SHORT_WIDTH,
+            fontsize=fs_overlay,
+            max_lines=2,
         )
+        t0, t1 = _overlay_text_segment_window(idx, n_lines, duration_sec)
+        enable = _drawtext_enable_between(pts0 + t0, pts0 + t1)
+        parts = [p.strip() for p in wrapped.split("\n") if p.strip()]
+        if not parts:
+            continue
+        # Two drawtext filters (comma-chained): textfile= is unreliable on some Windows/FFmpeg builds.
+        row_gap = max(int(fs_overlay * 0.92), 14)
+        if len(parts) >= 2:
+            esc_a = escape_drawtext_line(parts[0][:500])
+            esc_b = escape_drawtext_line(parts[1][:500])
+            overlay_filters.append(
+                f'drawtext=text="{esc_a}"{font_clause}:{style}:'
+                f"x=(w-text_w)/2:y=(h-text_h)/2-{row_gap}:{enable}"
+            )
+            overlay_filters.append(
+                f'drawtext=text="{esc_b}"{font_clause}:{style}:'
+                f"x=(w-text_w)/2:y=(h-text_h)/2+{max(row_gap // 2, 6)}:{enable}"
+            )
+        else:
+            esc = escape_drawtext_line(parts[0][:900])
+            overlay_filters.append(
+                f'drawtext=text="{esc}"{font_clause}:{style}:'
+                f"x=(w-text_w)/2:y=(h-text_h)/2:{enable}"
+            )
 
     # Input is already 9:16 from _scale_and_subs (music step copies video); only burn drawtext.
     vf_inner = ",".join(overlay_filters)
@@ -443,6 +544,8 @@ def process_upload(
     vertical_fit: VerticalFitMode | None = None,
     caption_srt_override: str | None = None,
     reuse_whisper_cache: dict[str, Any] | None = None,
+    vision_onscreen_subtitles: bool = False,
+    vision_onscreen_subtitles_english: bool = False,
 ) -> tuple[bytes, dict[str, Any]]:
     """
     Full pipeline: validate duration → transcribe → SRT → 9:16 + burn-in subs → optional music
@@ -457,6 +560,11 @@ def process_upload(
 
     ``reuse_whisper_cache``: dict with keys ``language``, ``text``, ``words`` (list of ``start``/``end``/``text``)
     from metadata ``whisper_cache`` — skips transcription when valid.
+
+    ``vision_onscreen_subtitles``: when speech is missing or very thin, sample the source video and use
+    vision to read on-screen text into burned-in SRT (needs ``openai_api_key``).
+
+    ``vision_onscreen_subtitles_english``: if True with vision subtitles, translate visible text to English.
     """
     log = progress or (lambda _m: None)
 
@@ -551,14 +659,57 @@ def process_upload(
 
     auto_srt = words_to_srt(tr.words)
     ov = (caption_srt_override or "").strip()
+    burned_subtitle_source = "none"
     if ov and _is_probable_srt(ov):
         srt_text = ov
+        burned_subtitle_source = "override"
         log("Using user-provided SRT for burned-in speech captions.")
     elif ov:
         log("Caption SRT override ignored (not valid SRT); using auto-generated cues from speech.")
         srt_text = auto_srt
+        burned_subtitle_source = "whisper" if auto_srt.strip() else "none"
     else:
         srt_text = auto_srt
+        burned_subtitle_source = "whisper" if auto_srt.strip() else "none"
+
+    thin_for_vision = not tr.words or _transcript_insufficient_for_topic(tr.text.strip())
+    use_onscreen = (
+        vision_onscreen_subtitles
+        and openai_api_key
+        and thin_for_vision
+        and not (ov and _is_probable_srt(ov))
+    )
+    if use_onscreen:
+        log("Building burned-in captions from on-screen text (vision)…")
+        n_sub = 6
+        prefix = "sub_vision"
+        try:
+            groups = ffmpeg_util.extract_jpeg_frames_per_segment(
+                local_in,
+                work_dir,
+                n_segments=n_sub,
+                file_prefix=prefix,
+            )
+            if any(groups):
+                vision_srt = generate_onscreen_subtitle_srt_from_segments(
+                    groups,
+                    duration_sec=dur,
+                    api_key=openai_api_key,
+                    translate_to_english=vision_onscreen_subtitles_english,
+                )
+                if vision_srt.strip():
+                    srt_text = vision_srt
+                    burned_subtitle_source = (
+                        "vision_onscreen_en" if vision_onscreen_subtitles_english else "vision_onscreen"
+                    )
+                    log("Vision-based on-screen subtitle SRT applied.")
+                else:
+                    log("Vision on-screen subtitles returned empty; keeping speech-based SRT if any.")
+        except ffmpeg_util.FFmpegError as e:
+            log(f"Frame extraction for on-screen subtitles failed ({str(e)[:200]}).")
+        finally:
+            for fp in work_dir.glob(f"{prefix}_*.jpg"):
+                fp.unlink(missing_ok=True)
 
     srt_path = work_dir / "captions.srt"
     srt_name: str | None = None
@@ -614,6 +765,7 @@ def process_upload(
         work_dir=work_dir,
     )
     meta["transcript"] = tr.text
+    meta["burned_subtitle_source"] = burned_subtitle_source
     meta["visual_description"] = visual_fallback
     meta["language"] = tr.language
     meta["duration_seconds"] = round(dur, 2)

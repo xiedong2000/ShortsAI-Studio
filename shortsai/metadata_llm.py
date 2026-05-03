@@ -9,6 +9,7 @@ from typing import Any
 from openai import OpenAI
 
 from . import ffmpeg_util
+from .srt_build import equal_segments_srt
 
 # Double quotes + guillemets: remove everywhere (model often wraps lines in "..." or „…").
 _OVERLAY_QUOTE_GLOBAL = frozenset(
@@ -227,6 +228,165 @@ def generate_metadata(
     out = _metadata_dict_from_parsed(data, notes="")
     out["metadata_source"] = "transcript_llm"
     return out
+
+
+def _translate_subtitle_lines_to_english(lines: list[str], client: OpenAI) -> list[str]:
+    """
+    Text-only pass: vision models often copy CJK from pixels. This step forces natural English (Latin script).
+    """
+    n = len(lines)
+    if n == 0:
+        return lines
+    try:
+        payload = json.dumps(lines, ensure_ascii=False)
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Reply with valid JSON only: one JSON array of strings. "
+                        "The array length MUST exactly match the input array length. "
+                        "Element i is the English translation of input element i. "
+                        "Use only English: Latin letters, Arabic numerals, spaces, apostrophes, commas, periods, "
+                        "question marks, exclamation points, hyphens. "
+                        "Do NOT output Chinese, Japanese, Korean, Arabic, Cyrillic, or other non-Latin scripts. "
+                        "If an input string is exactly \"-\", output \"-\"."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Translate each subtitle line to English. Preserve order; same number of strings.\n"
+                        f"Input ({n} strings as JSON):\n{payload}"
+                    ),
+                },
+            ],
+            temperature=0.12,
+            max_tokens=1200,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
+        raw = re.sub(r"\s*```\s*$", "", raw.strip())
+        m = re.search(r"\[[\s\S]*\]", raw)
+        if not m:
+            return lines
+        arr = json.loads(m.group())
+        if not isinstance(arr, list):
+            return lines
+        out = [strip_overlay_quotes(str(x))[:120] for x in arr[:n]]
+        while len(out) < n:
+            out.append("-")
+        out = out[:n]
+        out = [x.strip() if x.strip() else "-" for x in out]
+        return out
+    except Exception:
+        return lines
+
+
+def generate_onscreen_subtitle_srt_from_segments(
+    segment_frames: list[list[Path]],
+    *,
+    duration_sec: float,
+    api_key: str | None,
+    translate_to_english: bool = False,
+) -> str:
+    """
+    Build SubRip text from visible on-screen words (lyrics, titles, stickers) per timeline segment.
+    Used when there is little or no speech for Whisper-based cues.
+
+    When ``translate_to_english`` is True, runs a **second** text-only translation call so captions
+    are actually English (vision alone often echoes Chinese from the frames).
+    """
+    if not api_key or not segment_frames or duration_sec <= 0:
+        return ""
+
+    n = len(segment_frames)
+    client = OpenAI(api_key=api_key)
+    # Pass 1: always read text in the original script from the frames (better for OCR fidelity).
+    lang_rule = (
+        "For each segment, transcribe the main readable text **in the same language and script** "
+        "as shown in the frames. Preserve characters as viewers see them (do not translate in this step)."
+    )
+
+    header = (
+        f"This is a {duration_sec:.2f}s vertical video split into {n} chronological segments. "
+        f"There may be no clear speech—e.g. a music clip with lyrics on screen. "
+        f"{lang_rule} "
+        f"Reply with a JSON array only (no markdown): exactly {n} strings. "
+        f"String i must correspond only to segment i (grouped images in order). "
+        f"Transcribe what is actually visible (lyrics line, title, sticker text)—do not invent marketing lines. "
+        f"Max 90 characters per string; no hashtags; avoid emojis. No quotation marks inside strings. "
+        f"If a segment has no readable text, use a single dash \"-\"."
+    )
+
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": header}]
+    for i, paths in enumerate(segment_frames):
+        t_a = duration_sec * i / n
+        t_b = duration_sec * (i + 1) / n
+        user_content.append(
+            {"type": "text", "text": f"— Segment {i + 1} of {n}: ~{t_a:.2f}s–~{t_b:.2f}s —"}
+        )
+        if not paths:
+            user_content.append(
+                {
+                    "type": "text",
+                    "text": "(No frame—output \"-\" only.)",
+                }
+            )
+            continue
+        for p in paths[:2]:
+            try:
+                raw = p.read_bytes()
+            except OSError:
+                continue
+            b64 = base64.standard_b64encode(raw).decode("ascii")
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"},
+                }
+            )
+
+    if sum(1 for x in user_content if x.get("type") == "image_url") == 0:
+        return ""
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"Reply with valid JSON only: a JSON array of exactly {n} strings.",
+                },
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.22,
+            max_tokens=900,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.I)
+        content = re.sub(r"\s*```\s*$", "", content.strip())
+        m = re.search(r"\[[\s\S]*\]", content)
+        if not m:
+            return ""
+        arr = json.loads(m.group())
+        if not isinstance(arr, list):
+            return ""
+        lines = [strip_overlay_quotes(str(x))[:90] for x in arr[:n]]
+        while len(lines) < n:
+            lines.append("-")
+        lines = lines[:n]
+        lines = [x.strip() if x.strip() else "-" for x in lines]
+        if all(x == "-" for x in lines):
+            return ""
+
+        if translate_to_english:
+            lines = _translate_subtitle_lines_to_english(lines, client)
+
+        return equal_segments_srt(lines, duration_sec)
+    except Exception:
+        return ""
 
 
 def generate_overlay_text_from_vision_segments(

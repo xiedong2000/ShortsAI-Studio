@@ -138,6 +138,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="How landscape clips fit 9:16 (default: env SHORTSAI_VERTICAL_FIT or crop).",
     )
     p.add_argument(
+        "--vision-onscreen-captions",
+        action="store_true",
+        help="When speech is missing or very thin, burn subtitles from on-screen text (OpenAI vision; needs key).",
+    )
+    p.add_argument(
+        "--vision-onscreen-captions-english",
+        action="store_true",
+        help="With --vision-onscreen-captions, translate visible text to English in burned-in captions.",
+    )
+    p.add_argument(
         "--keep-work-dir",
         action="store_true",
         help="Do not delete the temp work directory (prints its path for debugging).",
@@ -275,6 +285,8 @@ def main(argv: list[str] | None = None) -> int:
             whisper_task=whisper_task,
             whisper_language_hint=lang_hint,
             vertical_fit=args.vertical_fit,
+            vision_onscreen_subtitles=bool(args.vision_onscreen_captions),
+            vision_onscreen_subtitles_english=bool(args.vision_onscreen_captions_english),
         )
         if music_path is not None:
             meta["music_file"] = music_path.name

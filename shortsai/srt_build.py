@@ -80,3 +80,27 @@ def words_to_srt(
         blocks.append(f"{i}\n{_format_ts(a)} --> {_format_ts(b)}\n{body}\n")
 
     return "\n".join(blocks)
+
+
+def equal_segments_srt(lines: list[str], duration_sec: float, *, max_chars: int = 42) -> str:
+    """
+    Build SRT with one cue per segment, splitting [0, duration_sec] into equal windows.
+    Used when timings come from video segments (e.g. vision-read on-screen text), not Whisper words.
+    """
+    cleaned = [str(x).strip() for x in lines if str(x).strip()]
+    if not cleaned or duration_sec <= 0:
+        return ""
+    n = len(cleaned)
+    blocks: list[str] = []
+    idx = 1
+    for i, txt in enumerate(cleaned):
+        t0 = duration_sec * i / n
+        if i == n - 1:
+            t1 = duration_sec
+        else:
+            t1 = max(t0 + 0.05, duration_sec * (i + 1) / n - 0.02)
+        wrapped = _wrap_line(txt, max_chars)
+        body = "\n".join(wrapped) if wrapped else txt
+        blocks.append(f"{idx}\n{_format_ts(t0)} --> {_format_ts(t1)}\n{body}\n")
+        idx += 1
+    return "\n".join(blocks)
