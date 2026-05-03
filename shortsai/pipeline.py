@@ -11,7 +11,6 @@ from faster_whisper import WhisperModel
 
 from shortsai import ffmpeg_util
 from shortsai.metadata_llm import (
-    _transcript_insufficient_for_topic,
     generate_metadata,
     generate_overlay_text,
     generate_overlay_text_from_vision_segments,
@@ -510,14 +509,7 @@ def process_upload(
 
     log("Generating metadata…")
     metadata_input = tr.text.strip() or visual_fallback
-    if _transcript_insufficient_for_topic(metadata_input) and openai_api_key:
-        log("Transcript short or empty—using video frames for title/description when possible…")
-    meta = generate_metadata(
-        metadata_input,
-        api_key=openai_api_key,
-        video_path=scaled,
-        work_dir=work_dir,
-    )
+    meta = generate_metadata(metadata_input, api_key=openai_api_key)
     meta["transcript"] = tr.text
     meta["visual_description"] = visual_fallback
     meta["language"] = tr.language
