@@ -38,6 +38,7 @@ _SS_WHISPER_TASK = "whisper_task_ui"
 _SS_SPEECH_HINT = "speech_lang_hint"
 _SS_MUSIC_PICK = "music_file_pick"
 _SS_VERTICAL_FIT = "vertical_fit_ui"
+_SS_WHISPER_CACHE = "whisper_word_cache"
 _CURRENT_STEP = "current_step"
 
 
@@ -130,6 +131,8 @@ def _init_session_defaults() -> None:
         st.session_state[_SS_MUSIC_PICK] = "None"
     if _SS_VERTICAL_FIT not in st.session_state:
         st.session_state[_SS_VERTICAL_FIT] = _default_vertical_fit_from_env()
+    if _SS_WHISPER_CACHE not in st.session_state:
+        st.session_state[_SS_WHISPER_CACHE] = None
     if _CURRENT_STEP not in st.session_state:
         st.session_state[_CURRENT_STEP] = 1
 
@@ -357,6 +360,9 @@ def main() -> None:
             "Optional speech language hint (ISO 639-1, e.g. zh, ja). Empty = auto-detect.",
             key=_SS_SPEECH_HINT,
         )
+        st.caption(
+            "Burned-in speech caption size: set SHORTSAI_CAPTION_FONT_SIZE in .env (default 14; try 12 for smaller text)."
+        )
         _step_footer(2)
 
     st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
@@ -432,6 +438,7 @@ def main() -> None:
                     else:
                         meta["music_file"] = None
 
+                    st.session_state[_SS_WHISPER_CACHE] = meta.get("whisper_cache")
                     st.session_state[_SS_MP4] = mp4_bytes
                     st.session_state[_SS_META] = meta
                     st.session_state[_SS_HAS_AUDIO] = has_audio
@@ -473,6 +480,7 @@ def main() -> None:
                 if st.button("Clear results", help="Remove the last export from this page"):
                     st.session_state[_SS_MP4] = None
                     st.session_state[_SS_META] = None
+                    st.session_state[_SS_WHISPER_CACHE] = None
                     st.session_state[_SS_HAS_AUDIO] = True
                     st.session_state[_CURRENT_STEP] = 3
                     st.session_state[_SCROLL_PENDING] = 3
@@ -519,6 +527,87 @@ def main() -> None:
                     file_name="metadata.json",
                     mime="application/json",
                 )
+            srt_dl = (meta.get("speech_srt") or "").strip()
+            if srt_dl:
+                st.download_button(
+                    "Download captions.srt",
+                    data=srt_dl.encode("utf-8"),
+                    file_name="captions.srt",
+                    mime="text/plain",
+                )
+
+            with st.expander("Edit speech captions (SRT) & re-export", expanded=False):
+                st.caption(
+                    "Fix typos in cue text only; keep cue numbers and `00:00:00,000 --> 00:00:00,000` lines intact. "
+                    "Re-export skips Whisper if the cache below is present (same upload + Step 2 options)."
+                )
+                with st.form("reexport_captions_form"):
+                    srt_default = (meta.get("speech_srt") or "").strip()
+                    edited_srt = st.text_area(
+                        "SRT",
+                        value=srt_default,
+                        height=260,
+                        help="Standard SubRip format (UTF-8).",
+                    )
+                    re_go = st.form_submit_button("Re-export MP4 with edited captions")
+                if re_go:
+                    cache = st.session_state.get(_SS_WHISPER_CACHE)
+                    if not isinstance(cache, dict) or not cache.get("words"):
+                        st.error(
+                            "Whisper cache is missing (e.g. after **Clear results**). "
+                            "Run **Generate Short** in Step 3 once, then edit and re-export here."
+                        )
+                    elif not edited_srt.strip() or "-->" not in edited_srt:
+                        st.error("SRT looks empty or invalid (each cue needs a `-->` timestamp line).")
+                    else:
+                        ub = st.session_state.get(_SS_UPLOAD_BYTES)
+                        if not ub:
+                            st.error("Upload bytes missing — go back to Step 1 and select your video again.")
+                        else:
+                            music_re: Path | None = None
+                            pick_r = st.session_state.get(_SS_MUSIC_PICK, "None")
+                            if pick_r and pick_r != "None" and music_files:
+                                for p in music_files:
+                                    if p.name == pick_r:
+                                        music_re = p
+                                        break
+                            work2 = Path(tempfile.mkdtemp(prefix="shortsai_re_"))
+                            try:
+                                src2 = work2 / f"upload{Path(upload_name).suffix or '.mp4'}"
+                                src2.write_bytes(ub)
+                                model = _whisper_model()
+                                with st.spinner("Re-exporting with your SRT…"):
+                                    mp4_b, meta2 = process_upload(
+                                        src2,
+                                        work_dir=work2,
+                                        whisper=model,
+                                        whisper_model=os.environ.get("SHORTSAI_WHISPER_MODEL", "base"),
+                                        openai_api_key=api_key.strip() or None,
+                                        music_path=music_re,
+                                        music_volume=float(st.session_state[_SS_MUSIC_VOL]),
+                                        manual_overlay_text=(st.session_state.get(_SS_MANUAL_OVERLAY) or "").strip()
+                                        or None,
+                                        progress=None,
+                                        whisper_task=st.session_state[_SS_WHISPER_TASK],
+                                        whisper_language_hint=(st.session_state.get(_SS_SPEECH_HINT) or "").strip()
+                                        or None,
+                                        vertical_fit=cast(VerticalFitMode, st.session_state[_SS_VERTICAL_FIT]),
+                                        caption_srt_override=edited_srt.strip(),
+                                        reuse_whisper_cache=cache,
+                                    )
+                                if music_re is not None:
+                                    meta2["music_file"] = music_re.name
+                                else:
+                                    meta2["music_file"] = None
+                                st.session_state[_SS_WHISPER_CACHE] = meta2.get("whisper_cache")
+                                st.session_state[_SS_MP4] = mp4_b
+                                st.session_state[_SS_META] = meta2
+                                st.success("Re-export complete.")
+                                st.rerun()
+                            except Exception as e:
+                                st.exception(e)
+                            finally:
+                                shutil.rmtree(work2, ignore_errors=True)
 
             st.markdown("##### Title")
             title = meta.get("title") or ""
@@ -537,7 +626,13 @@ def main() -> None:
             st.write(tags_str if tags_str else "_None_")
 
             with st.expander("Full metadata (JSON, without long transcript)"):
-                st.json({k: v for k, v in meta.items() if k != "transcript"})
+                st.json(
+                    {
+                        k: v
+                        for k, v in meta.items()
+                        if k not in ("transcript", "whisper_cache", "speech_srt")
+                    }
+                )
 
             with st.expander("Transcript"):
                 st.write(meta.get("transcript", "") or "_Empty_")

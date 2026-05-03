@@ -18,7 +18,7 @@ from shortsai.metadata_llm import (
     strip_overlay_quotes,
 )
 from shortsai.srt_build import words_to_srt
-from shortsai.transcribe import transcribe
+from shortsai.transcribe import TranscriptResult, WordSpan, transcribe
 
 VerticalFitMode = Literal["letterbox", "crop", "blur_fill"]
 
@@ -133,6 +133,73 @@ def _coerce_vertical_fit(raw: str | None) -> VerticalFitMode:
     return "crop"
 
 
+def _caption_font_size_from_env() -> int:
+    """ASS FontSize for burned-in speech subtitles (libass default can look large on 1080×1920)."""
+    raw = (os.environ.get("SHORTSAI_CAPTION_FONT_SIZE") or "14").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 14
+    return max(10, min(44, n))
+
+
+def _speech_subtitles_vf(srt_basename: str) -> str:
+    """SRT burn-in with UTF-8 and configurable font size (SHORTSAI_CAPTION_FONT_SIZE, default 14)."""
+    fs = _caption_font_size_from_env()
+    style = f"FontSize={fs}\\,Outline=2\\,Shadow=0.5"
+    return f"subtitles={srt_basename}:charenc=UTF-8:force_style={style}"
+
+
+def _is_probable_srt(s: str) -> bool:
+    t = s.strip()
+    return len(t) >= 12 and "-->" in t
+
+
+def _srt_plain_for_metadata(srt: str) -> str:
+    """Join non-timing lines from SRT for title/description context after user edits."""
+    parts: list[str] = []
+    for line in srt.splitlines():
+        s = line.strip()
+        if not s or s.isdigit() or "-->" in s:
+            continue
+        parts.append(s)
+    return " ".join(parts).strip()
+
+
+def _whisper_cache_dict(tr: TranscriptResult) -> dict[str, Any]:
+    return {
+        "language": tr.language,
+        "text": tr.text,
+        "words": [{"start": w.start, "end": w.end, "text": w.text} for w in tr.words],
+    }
+
+
+def _transcript_from_whisper_cache(cache: dict[str, Any]) -> TranscriptResult:
+    words_raw = cache.get("words")
+    if not isinstance(words_raw, list):
+        words_raw = []
+    words: list[WordSpan] = []
+    for w in words_raw:
+        if not isinstance(w, dict):
+            continue
+        try:
+            words.append(
+                WordSpan(
+                    start=float(w["start"]),
+                    end=float(w["end"]),
+                    text=str(w.get("text", "")).strip(),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    words = [w for w in words if w.text]
+    text = str(cache.get("text") or "").strip()
+    if not text and words:
+        text = " ".join(w.text for w in words)
+    lang = str(cache.get("language") or "en")
+    return TranscriptResult(language=lang, text=text, words=words)
+
+
 def _extract_audio(video: Path, wav_out: Path) -> None:
     ffmpeg_util.run_ffmpeg(
         [
@@ -165,7 +232,7 @@ def _scale_and_subs(
         srt_path = cwd / srt_name
         use_subs = srt_path.exists() and srt_path.stat().st_size > 0
 
-    sub_clause = f",subtitles={srt_name}" if use_subs else ""
+    sub_clause = f",{_speech_subtitles_vf(srt_name)}" if use_subs else ""
 
     if vertical_fit == "letterbox":
         inner = (
@@ -195,7 +262,7 @@ def _scale_and_subs(
                 f"[vb_in]{bg}[bg];"
                 f"[fg_in]{fg}[fg];"
                 f"[bg][fg]overlay=0:0[vpre];"
-                f"[vpre]subtitles={srt_name}[vout]"
+                f"[vpre]{_speech_subtitles_vf(srt_name)}[vout]"
             )
         else:
             filter_complex = (
@@ -373,6 +440,8 @@ def process_upload(
     whisper_task: Literal["transcribe", "translate"] | None = None,
     whisper_language_hint: str | None = None,
     vertical_fit: VerticalFitMode | None = None,
+    caption_srt_override: str | None = None,
+    reuse_whisper_cache: dict[str, Any] | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """
     Full pipeline: validate duration → transcribe → SRT → 9:16 + burn-in subs → optional music
@@ -380,6 +449,13 @@ def process_upload(
     Returns (mp4_bytes, metadata_dict).
 
     ``vertical_fit``: letterbox / crop / blur_fill; ``None`` uses env ``SHORTSAI_VERTICAL_FIT`` (default crop).
+
+    ``caption_srt_override``: full SRT file contents to burn instead of auto cues from Whisper word timings
+    (must look like valid SRT, e.g. contain ``-->``). Use with ``reuse_whisper_cache`` from a prior export
+    to skip re-running Whisper on re-export.
+
+    ``reuse_whisper_cache``: dict with keys ``language``, ``text``, ``words`` (list of ``start``/``end``/``text``)
+    from metadata ``whisper_cache`` — skips transcription when valid.
     """
     log = progress or (lambda _m: None)
 
@@ -420,8 +496,17 @@ def process_upload(
     log("Transcribing (first run may download the Whisper model)…")
 
     visual_fallback = ""
-    # Check if audio file is empty
-    if wav.stat().st_size == 0:
+    use_whisper_cache = (
+        reuse_whisper_cache is not None
+        and isinstance(reuse_whisper_cache, dict)
+        and isinstance(reuse_whisper_cache.get("words"), list)
+        and len(reuse_whisper_cache["words"]) > 0
+    )
+
+    if use_whisper_cache:
+        log("Skipping Whisper — reusing cached word timings from a prior run.")
+        tr = _transcript_from_whisper_cache(reuse_whisper_cache)
+    elif wav.stat().st_size == 0:
         log("Audio file is empty - no transcription possible")
         tr = TranscriptResult(language="en", text="", words=[])
     else:
@@ -455,7 +540,6 @@ def process_upload(
     if not tr.words:
         visual_fallback = input_video.stem.replace("_", " ").replace("-", " ")
 
-
     log(f"Transcription result: language={tr.language}, text length={len(tr.text)}, words detected={len(tr.words)}")
     if not tr.words:
         log("No words detected - check if audio has speech or if volume is too low")
@@ -464,8 +548,17 @@ def process_upload(
     else:
         visual_fallback = ""
 
+    auto_srt = words_to_srt(tr.words)
+    ov = (caption_srt_override or "").strip()
+    if ov and _is_probable_srt(ov):
+        srt_text = ov
+        log("Using user-provided SRT for burned-in speech captions.")
+    elif ov:
+        log("Caption SRT override ignored (not valid SRT); using auto-generated cues from speech.")
+        srt_text = auto_srt
+    else:
+        srt_text = auto_srt
 
-    srt_text = words_to_srt(tr.words)
     srt_path = work_dir / "captions.srt"
     srt_name: str | None = None
     if srt_text.strip():
@@ -508,7 +601,9 @@ def process_upload(
         log("No music selected or music file not found")
 
     log("Generating metadata…")
-    metadata_input = tr.text.strip() or visual_fallback
+    meta_hint = _srt_plain_for_metadata(srt_text) if srt_text.strip() else ""
+    metadata_input = (meta_hint or tr.text).strip() or visual_fallback
+    caption_plain = metadata_input
     meta = generate_metadata(metadata_input, api_key=openai_api_key)
     meta["transcript"] = tr.text
     meta["visual_description"] = visual_fallback
@@ -523,7 +618,7 @@ def process_upload(
         overlay_texts = [manual_overlay_text.strip()]
         meta["overlay_text_source"] = "manual"
     else:
-        spoken = " ".join(x for x in [tr.text.strip(), visual_fallback] if x).strip()
+        spoken = " ".join(x for x in [caption_plain, visual_fallback] if x).strip()
         if openai_api_key:
             log("Analyzing video by segment for on-screen text (vision)…")
             vision_groups: list[list[Path]] = []
@@ -559,7 +654,7 @@ def process_upload(
                 meta.get("description", "") or meta.get("title", "") or visual_fallback or ""
             )
             text_for_lines = "\n".join(
-                x for x in [visual_source, tr.text.strip()[:4000]] if x
+                x for x in [visual_source, caption_plain[:4000]] if x
             ).strip()
             if not text_for_lines:
                 text_for_lines = visual_fallback or "Short clip"
@@ -567,7 +662,7 @@ def process_upload(
             if not overlay_texts:
                 raw_fallback = " ".join(
                     x.strip()
-                    for x in [meta.get("title", ""), meta.get("description", ""), visual_fallback, tr.text.strip()]
+                    for x in [meta.get("title", ""), meta.get("description", ""), visual_fallback, caption_plain]
                     if x
                 )
                 if raw_fallback:
@@ -599,9 +694,14 @@ def process_upload(
         log(f"Warning: Scene text overlay failed ({str(e)[:300]}), continuing without overlays")
         meta["scene_overlay_error"] = str(e)[:500]
 
+    meta["speech_srt"] = srt_text.strip()
+    meta["whisper_cache"] = _whisper_cache_dict(tr)
+
     mp4_bytes = final_video.read_bytes()
     return mp4_bytes, meta
 
 
 def metadata_to_json_bytes(meta: dict[str, Any]) -> bytes:
-    return json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8")
+    # whisper_cache is large and only for in-app re-export; keep sidecar JSON smaller.
+    slim = {k: v for k, v in meta.items() if k != "whisper_cache"}
+    return json.dumps(slim, ensure_ascii=False, indent=2).encode("utf-8")
