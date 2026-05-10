@@ -132,6 +132,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional single line of on-screen text (replaces AI scene lines).",
     )
     p.add_argument(
+        "--overlay-position",
+        choices=("upper", "middle", "lower"),
+        default=None,
+        help="Default vertical band for timed scene lines (env SHORTSAI_OVERLAY_POSITION or middle).",
+    )
+    p.add_argument(
+        "--overlay-positions",
+        default=None,
+        metavar="CSV",
+        help='Comma-separated bands per timed line, e.g. "upper,middle,lower". Pads with --overlay-position.',
+    )
+    p.add_argument(
         "--vertical-fit",
         choices=("letterbox", "crop", "blur_fill"),
         default=None,
@@ -207,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     from shortsai import ffmpeg_util
     from shortsai.pipeline import (
         MAX_DURATION_SEC,
+        coerce_overlay_position,
         metadata_to_json_bytes,
         process_upload,
     )
@@ -240,6 +253,15 @@ def main(argv: list[str] | None = None) -> int:
 
     lang_hint = args.language_hint.strip() or None
     manual_overlay = args.manual_overlay.strip() or None
+    overlay_pos_default = (
+        coerce_overlay_position(args.overlay_position) if args.overlay_position else None
+    )
+    csv_ov = (args.overlay_positions or "").strip()
+    overlay_pos_list = None
+    if csv_ov:
+        parts = [p.strip() for p in csv_ov.split(",") if p.strip()]
+        if parts:
+            overlay_pos_list = [coerce_overlay_position(p) for p in parts]
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip() or None
 
     model_name = os.environ.get("SHORTSAI_WHISPER_MODEL", "base")
@@ -287,6 +309,8 @@ def main(argv: list[str] | None = None) -> int:
             vertical_fit=args.vertical_fit,
             vision_onscreen_subtitles=bool(args.vision_onscreen_captions),
             vision_onscreen_subtitles_english=bool(args.vision_onscreen_captions_english),
+            overlay_position=overlay_pos_default,
+            overlay_positions=overlay_pos_list,
         )
         if music_path is not None:
             meta["music_file"] = music_path.name

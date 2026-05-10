@@ -13,9 +13,12 @@ from dotenv import load_dotenv
 from faster_whisper import WhisperModel
 
 from shortsai import ffmpeg_util
+from shortsai.metadata_llm import strip_overlay_quotes
 from shortsai.pipeline import (
     MAX_DURATION_SEC,
     VerticalFitMode,
+    OverlayPosition,
+    coerce_overlay_position,
     metadata_to_json_bytes,
     process_upload,
 )
@@ -42,6 +45,8 @@ _SS_WHISPER_CACHE = "whisper_word_cache"
 _SS_VISION_ONSCREEN_SUBS = "vision_onscreen_subs"
 _SS_VISION_ONSCREEN_EN = "vision_onscreen_en"
 _CURRENT_STEP = "current_step"
+_SS_OVERLAY_DEFAULT = "overlay_default_pos"
+_SS_OVERLAY_POSITIONS_CSV = "overlay_positions_csv"
 
 WIZARD_STEP_LABELS = ["Upload", "Options", "Generate", "Results"]
 
@@ -275,6 +280,12 @@ def _init_session_defaults() -> None:
         st.session_state[_SS_VISION_ONSCREEN_EN] = False
     if _CURRENT_STEP not in st.session_state:
         st.session_state[_CURRENT_STEP] = 1
+    if _SS_OVERLAY_DEFAULT not in st.session_state:
+        st.session_state[_SS_OVERLAY_DEFAULT] = coerce_overlay_position(
+            os.environ.get("SHORTSAI_OVERLAY_POSITION")
+        )
+    if _SS_OVERLAY_POSITIONS_CSV not in st.session_state:
+        st.session_state[_SS_OVERLAY_POSITIONS_CSV] = ""
 
 
 def _default_vertical_fit_from_env() -> str:
@@ -288,6 +299,56 @@ def _default_vertical_fit_from_env() -> str:
     if raw in ("letterbox",):
         return "letterbox"
     return "crop"
+
+
+def _parse_overlay_positions_csv(s: str) -> list[OverlayPosition] | None:
+    raw = (s or "").strip()
+    if not raw:
+        return None
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if not parts:
+        return None
+    return [coerce_overlay_position(p) for p in parts]
+
+
+def _scene_positions_for_reexport(meta: dict[str, Any], ov_lines: list[str]) -> list[OverlayPosition] | None:
+    """Widget state if initialized, else positions stored on last export metadata."""
+    if not ov_lines:
+        return None
+    fpr = ("ov_pos_ui", tuple(ov_lines))
+    if st.session_state.get("_ov_pos_ui_fpr") == fpr:
+        try:
+            return [
+                cast(OverlayPosition, st.session_state[f"opos_sb_{i}"]) for i in range(len(ov_lines))
+            ]
+        except KeyError:
+            pass
+    raw = meta.get("on_screen_overlay_positions")
+    if isinstance(raw, list) and len(raw) == len(ov_lines):
+        return [coerce_overlay_position(str(x)) for x in raw]
+    return None
+
+
+def _read_scene_editors(n: int) -> tuple[list[str], list[OverlayPosition]] | None:
+    """
+    Read per-line text + vertical band from Step 4 widgets. Empty text rows are dropped together
+    with their band (remaining lines keep order; time windows shrink to match).
+    """
+    if n <= 0:
+        return None
+    try:
+        raw_t = [str(st.session_state[f"otext_sb_{i}"]).strip() for i in range(n)]
+        raw_p = [cast(OverlayPosition, st.session_state[f"opos_sb_{i}"]) for i in range(n)]
+    except KeyError:
+        return None
+    pairs: list[tuple[str, OverlayPosition]] = []
+    for t, p in zip(raw_t, raw_p):
+        cleaned = strip_overlay_quotes(t).strip()
+        if cleaned:
+            pairs.append((cleaned, p))
+    if not pairs:
+        return None
+    return ([a for a, _ in pairs], [b for _, b in pairs])
 
 
 def _step_footer(step: int) -> None:
@@ -477,6 +538,26 @@ def main() -> None:
             key=_SS_MANUAL_OVERLAY,
         )
 
+        st.radio(
+            "On-screen scene text — default vertical band",
+            options=("upper", "middle", "lower"),
+            format_func=lambda v: {
+                "upper": "Upper — horizontal center, upper third",
+                "middle": "Middle — horizontal center (default)",
+                "lower": "Lower — horizontal center, lower third",
+            }[v],
+            key=_SS_OVERLAY_DEFAULT,
+            help="Used for each timed red scene line when you do not set a per-line value (Step 4) "
+            "or optional comma list below. Does not move speech captions.",
+        )
+        st.text_input(
+            "Optional: per-line vertical bands (comma-separated)",
+            key=_SS_OVERLAY_POSITIONS_CSV,
+            placeholder="e.g. upper, middle, lower",
+            help="Same order as timed scene lines after export (often 1–4). Words: upper, middle, lower. "
+            "Shorter lists pad with the default band above; extra entries are ignored.",
+        )
+
         _sub_default = 1 if st.session_state[_SS_WHISPER_TASK] == "translate" else 0
         sub_choice = st.radio(
             "Subtitles & transcript",
@@ -567,6 +648,9 @@ def main() -> None:
                         status.write("Note: no audio track detected — captions and transcript may be empty.")
 
                     model = _whisper_model()
+                    csv_pos = _parse_overlay_positions_csv(
+                        str(st.session_state.get(_SS_OVERLAY_POSITIONS_CSV) or "")
+                    )
                     mp4_bytes, meta = process_upload(
                         src,
                         work_dir=work,
@@ -582,6 +666,8 @@ def main() -> None:
                         vertical_fit=cast(VerticalFitMode, st.session_state[_SS_VERTICAL_FIT]),
                         vision_onscreen_subtitles=bool(st.session_state.get(_SS_VISION_ONSCREEN_SUBS)),
                         vision_onscreen_subtitles_english=bool(st.session_state.get(_SS_VISION_ONSCREEN_EN)),
+                        overlay_position=cast(OverlayPosition, st.session_state[_SS_OVERLAY_DEFAULT]),
+                        overlay_positions=csv_pos,
                     )
                     if music_choice is not None:
                         meta["music_file"] = music_choice.name
@@ -625,6 +711,22 @@ def main() -> None:
         if mp4_bytes is None or meta is None:
             st.info("Nothing here yet — use **Step 3 · Generate Short** above. After a successful run, results appear here.")
         else:
+            ov_lines_result = list(meta.get("on_screen_overlay_lines") or [])
+            fpr_ov = ("ov_pos_ui", tuple(ov_lines_result))
+            if st.session_state.get("_ov_pos_ui_fpr") != fpr_ov:
+                st.session_state["_ov_pos_ui_fpr"] = fpr_ov
+                prev_ov = meta.get("on_screen_overlay_positions")
+                for j in range(16):
+                    st.session_state.pop(f"opos_sb_{j}", None)
+                    st.session_state.pop(f"otext_sb_{j}", None)
+                ddef = coerce_overlay_position(st.session_state.get(_SS_OVERLAY_DEFAULT, "middle"))
+                for i in range(len(ov_lines_result)):
+                    d = ddef
+                    if isinstance(prev_ov, list) and i < len(prev_ov):
+                        d = coerce_overlay_position(str(prev_ov[i]))
+                    st.session_state[f"opos_sb_{i}"] = d
+                    st.session_state[f"otext_sb_{i}"] = ov_lines_result[i]
+
             c_clear, _ = st.columns([1, 3])
             with c_clear:
                 if st.button("Clear results", help="Remove the last export from this page"):
@@ -726,6 +828,20 @@ def main() -> None:
                                 src2 = work2 / f"upload{Path(upload_name).suffix or '.mp4'}"
                                 src2.write_bytes(ub)
                                 model = _whisper_model()
+                                srt_scene_lines: list[str] | None = None
+                                pos_r: list[OverlayPosition] | None = None
+                                srt_manual: str | None = None
+                                if ov_lines_result:
+                                    ed_srt = _read_scene_editors(len(ov_lines_result))
+                                    if ed_srt:
+                                        srt_scene_lines, pos_r = ed_srt
+                                    else:
+                                        pos_r = _scene_positions_for_reexport(
+                                            meta, ov_lines_result
+                                        )
+                                        srt_scene_lines = ov_lines_result
+                                if not srt_scene_lines:
+                                    srt_manual = (st.session_state.get(_SS_MANUAL_OVERLAY) or "").strip() or None
                                 with st.spinner("Re-exporting with your SRT…"):
                                     mp4_b, meta2 = process_upload(
                                         src2,
@@ -735,8 +851,7 @@ def main() -> None:
                                         openai_api_key=api_key.strip() or None,
                                         music_path=music_re,
                                         music_volume=float(st.session_state[_SS_MUSIC_VOL]),
-                                        manual_overlay_text=(st.session_state.get(_SS_MANUAL_OVERLAY) or "").strip()
-                                        or None,
+                                        manual_overlay_text=srt_manual,
                                         progress=None,
                                         whisper_task=st.session_state[_SS_WHISPER_TASK],
                                         whisper_language_hint=(st.session_state.get(_SS_SPEECH_HINT) or "").strip()
@@ -750,6 +865,11 @@ def main() -> None:
                                         vision_onscreen_subtitles_english=bool(
                                             st.session_state.get(_SS_VISION_ONSCREEN_EN)
                                         ),
+                                        overlay_position=cast(
+                                            OverlayPosition, st.session_state[_SS_OVERLAY_DEFAULT]
+                                        ),
+                                        overlay_positions=pos_r,
+                                        scene_overlay_lines_override=srt_scene_lines,
                                     )
                                 if music_re is not None:
                                     meta2["music_file"] = music_re.name
@@ -764,6 +884,111 @@ def main() -> None:
                                 st.exception(e)
                             finally:
                                 shutil.rmtree(work2, ignore_errors=True)
+
+            if ov_lines_result:
+                with st.expander("Scene text — edit wording & vertical position", expanded=False):
+                    st.caption(
+                        "Edit **red timed** scene lines and their band (upper / middle / lower). "
+                        "Clear a line’s text to drop that beat (later lines move up in the timeline). "
+                        "Re-export skips Whisper when the word cache is present."
+                    )
+                    for i in range(len(ov_lines_result)):
+                        st.text_area(
+                            f"Line {i + 1} — text",
+                            key=f"otext_sb_{i}",
+                            height=68,
+                            help="Shown during this line’s time slot. Leave empty to remove this slot.",
+                        )
+                        st.selectbox(
+                            "Vertical band",
+                            options=("upper", "middle", "lower"),
+                            key=f"opos_sb_{i}",
+                            format_func=lambda v: {
+                                "upper": "Upper — center",
+                                "middle": "Middle — center",
+                                "lower": "Lower — center",
+                            }[v],
+                        )
+                        st.markdown("---")
+
+                    if st.button("Re-export MP4 with edited scene text", key="btn_reexport_scene_pos"):
+                        cache2 = st.session_state.get(_SS_WHISPER_CACHE)
+                        if not isinstance(cache2, dict) or not cache2.get("words"):
+                            st.error(
+                                "Whisper cache is missing. Run **Generate Short** in Step 3 once, then try again."
+                            )
+                        else:
+                            ub2 = st.session_state.get(_SS_UPLOAD_BYTES)
+                            if not ub2:
+                                st.error("Upload missing — select your video again in Step 1.")
+                            else:
+                                music_re2: Path | None = None
+                                pick2 = st.session_state.get(_SS_MUSIC_PICK, "None")
+                                if pick2 and pick2 != "None" and music_files:
+                                    for p in music_files:
+                                        if p.name == pick2:
+                                            music_re2 = p
+                                            break
+                                work3 = Path(tempfile.mkdtemp(prefix="shortsai_re_scene_"))
+                                try:
+                                    src3 = work3 / f"upload{Path(upload_name).suffix or '.mp4'}"
+                                    src3.write_bytes(ub2)
+                                    model = _whisper_model()
+                                    ed3 = _read_scene_editors(len(ov_lines_result))
+                                    if ed3 is None:
+                                        st.error("Could not read scene text from the form.")
+                                    else:
+                                        lines_use, pos_use = ed3
+                                        srt_keep = (meta.get("speech_srt") or "").strip()
+                                        with st.spinner("Re-exporting scene text…"):
+                                            mp4_b3, meta3 = process_upload(
+                                                src3,
+                                                work_dir=work3,
+                                                whisper=model,
+                                                whisper_model=os.environ.get(
+                                                    "SHORTSAI_WHISPER_MODEL", "base"
+                                                ),
+                                                openai_api_key=api_key.strip() or None,
+                                                music_path=music_re2,
+                                                music_volume=float(st.session_state[_SS_MUSIC_VOL]),
+                                                manual_overlay_text=None,
+                                                progress=None,
+                                                whisper_task=st.session_state[_SS_WHISPER_TASK],
+                                                whisper_language_hint=(
+                                                    st.session_state.get(_SS_SPEECH_HINT) or ""
+                                                ).strip()
+                                                or None,
+                                                vertical_fit=cast(
+                                                    VerticalFitMode, st.session_state[_SS_VERTICAL_FIT]
+                                                ),
+                                                caption_srt_override=srt_keep if srt_keep else None,
+                                                reuse_whisper_cache=cache2,
+                                                vision_onscreen_subtitles=bool(
+                                                    st.session_state.get(_SS_VISION_ONSCREEN_SUBS)
+                                                ),
+                                                vision_onscreen_subtitles_english=bool(
+                                                    st.session_state.get(_SS_VISION_ONSCREEN_EN)
+                                                ),
+                                                overlay_position=cast(
+                                                    OverlayPosition,
+                                                    st.session_state[_SS_OVERLAY_DEFAULT],
+                                                ),
+                                                overlay_positions=pos_use,
+                                                scene_overlay_lines_override=lines_use,
+                                            )
+                                        if music_re2 is not None:
+                                            meta3["music_file"] = music_re2.name
+                                        else:
+                                            meta3["music_file"] = None
+                                        st.session_state[_SS_WHISPER_CACHE] = meta3.get("whisper_cache")
+                                        st.session_state[_SS_MP4] = mp4_b3
+                                        st.session_state[_SS_META] = meta3
+                                        st.success("Re-export complete.")
+                                        st.rerun()
+                                except Exception as e:
+                                    st.exception(e)
+                                finally:
+                                    shutil.rmtree(work3, ignore_errors=True)
 
             st.caption(
                 "Copy the fields below into YouTube Studio → your short → **Details**. "

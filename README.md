@@ -39,7 +39,7 @@ Turn a short clip (≤ **60s**) into a **1080×1920** YouTube Shorts–style MP4
 | **Vertical 9:16** | **Center crop** (default), **letterbox**, or **blur-fill** background (`boxblur` + overlay)—[`SHORTSAI_VERTICAL_FIT`](.env.example) or UI **Step 2** |
 | **Music** | Mix a track from `assets/music/` under speech (volume slider / CLI `--music-volume`) |
 | **Metadata** | JSON sidecar: title, description, tags, transcript, duration, `vertical_fit`, overlay source, etc. (`OPENAI_API_KEY` optional) |
-| **Scene text** | Short **red timed drawtext** lines on the video (vision + GPT when a key is set; otherwise text fallback) |
+| **Scene text** | Short **red timed drawtext** lines (vision + GPT or fallback). After export, **Step 4** can edit **wording and** vertical band per line; optional comma list in Step 2 or CLI `--overlay-positions`. |
 | **Apps** | **Streamlit** (`app.py`): stepped flow, session **last export** (MP4 + meta). **CLI** (`shorts_generator.py`): same pipeline for demos, scripts, CI |
 
 ---

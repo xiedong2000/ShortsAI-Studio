@@ -23,10 +23,67 @@ from shortsai.srt_build import words_to_srt
 from shortsai.transcribe import TranscriptResult, WordSpan, transcribe
 
 VerticalFitMode = Literal["letterbox", "crop", "blur_fill"]
+OverlayPosition = Literal["upper", "middle", "lower"]
 
 MAX_DURATION_SEC = 60.0
 SHORT_WIDTH = 1080
 SHORT_HEIGHT = 1920
+
+# Vertical centers (fraction of frame height) for on-screen scene text.
+# Picked to stay clear of the YouTube Shorts UI: top app bar (~0–10%) and
+# bottom action rail / caption block (~80–100%).
+_OVERLAY_Y_FRACTIONS: dict[str, float] = {
+    "upper": 0.25,
+    "middle": 0.50,
+    "lower": 0.75,
+}
+
+
+def _coerce_overlay_position(raw: str | OverlayPosition | None) -> OverlayPosition:
+    """Env / CLI / UI: upper | middle | lower (also top/bottom and *_center). Default: middle."""
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        return "middle"
+    if raw in ("upper", "middle", "lower"):
+        return cast(OverlayPosition, raw)
+    x = str(raw).strip().lower().replace("-", "_")
+    if x in ("upper", "top", "upper_center", "upper_third"):
+        return "upper"
+    if x in ("lower", "bottom", "lower_center", "lower_third"):
+        return "lower"
+    if x in ("middle", "center", "centre", "mid"):
+        return "middle"
+    return "middle"
+
+
+def coerce_overlay_position(raw: str | OverlayPosition | None) -> OverlayPosition:
+    """Public alias for :func:`_coerce_overlay_position` (UI / JSON sidecars)."""
+    return _coerce_overlay_position(raw)
+
+
+def normalize_overlay_line_positions(
+    count: int,
+    positions: list[OverlayPosition] | None,
+    default: OverlayPosition,
+) -> list[OverlayPosition]:
+    """Build a length-``count`` list; missing entries use ``default``."""
+    if count <= 0:
+        return []
+    out: list[OverlayPosition] = []
+    for i in range(count):
+        if positions and i < len(positions):
+            out.append(_coerce_overlay_position(positions[i]))
+        else:
+            out.append(default)
+    return out
+
+
+def _overlay_y_expression(position: OverlayPosition) -> str:
+    """drawtext y= expression that vertically centers the line at the chosen band."""
+    if position == "middle":
+        # Equivalent to h*0.5-text_h/2; keep the original form for clarity.
+        return "(h-text_h)/2"
+    frac = _OVERLAY_Y_FRACTIONS.get(position, 0.5)
+    return f"h*{frac:g}-text_h/2"
 
 # Copied into work_dir so drawtext can use fontfile=name.ttf (no Windows drive colons in -vf).
 _OVERLAY_FONT_LOCAL_NAME = "shortsai_overlay.ttf"
@@ -391,12 +448,21 @@ def _add_text_overlay(
     overlay_texts: list[str],
     cwd: Path,
     progress_emit: Callable[[str], None],
+    overlay_position: OverlayPosition = "middle",
+    overlay_positions: list[OverlayPosition] | None = None,
 ) -> None:
-    """Burn scene-based on-screen lines only (title/description/tags stay in metadata, not here)."""
+    """Burn scene-based on-screen lines only (title/description/tags stay in metadata, not here).
+
+    ``overlay_position`` is the default vertical band when ``overlay_positions`` is shorter than
+    the number of lines. ``overlay_positions[i]`` sets the band for timed line ``i`` (upper /
+    middle / lower).
+    """
     lines = [strip_overlay_quotes(x.strip()) for x in overlay_texts[:4] if x.strip()]
     lines = [x for x in lines if x]
     if not lines:
         raise ValueError("overlay_texts must contain at least one non-empty line")
+
+    pos_per_line = normalize_overlay_line_positions(len(lines), overlay_positions, overlay_position)
 
     duration_sec = ffmpeg_util.probe_duration_seconds(video_in)
     # drawtext 't' follows stream PTS; align segment windows to real timeline.
@@ -421,6 +487,7 @@ def _add_text_overlay(
     overlay_filters: list[str] = []
     n_lines = len(lines)
     for idx, text_content in enumerate(lines):
+        base_y = _overlay_y_expression(pos_per_line[idx])
         wrapped = _wrap_scene_overlay_line(
             text_content,
             video_width=SHORT_WIDTH,
@@ -439,17 +506,17 @@ def _add_text_overlay(
             esc_b = escape_drawtext_line(parts[1][:500])
             overlay_filters.append(
                 f'drawtext=text="{esc_a}"{font_clause}:{style}:'
-                f"x=(w-text_w)/2:y=(h-text_h)/2-{row_gap}:{enable}"
+                f"x=(w-text_w)/2:y={base_y}-{row_gap}:{enable}"
             )
             overlay_filters.append(
                 f'drawtext=text="{esc_b}"{font_clause}:{style}:'
-                f"x=(w-text_w)/2:y=(h-text_h)/2+{max(row_gap // 2, 6)}:{enable}"
+                f"x=(w-text_w)/2:y={base_y}+{max(row_gap // 2, 6)}:{enable}"
             )
         else:
             esc = escape_drawtext_line(parts[0][:900])
             overlay_filters.append(
                 f'drawtext=text="{esc}"{font_clause}:{style}:'
-                f"x=(w-text_w)/2:y=(h-text_h)/2:{enable}"
+                f"x=(w-text_w)/2:y={base_y}:{enable}"
             )
 
     # Input is already 9:16 from _scale_and_subs (music step copies video); only burn drawtext.
@@ -546,6 +613,9 @@ def process_upload(
     reuse_whisper_cache: dict[str, Any] | None = None,
     vision_onscreen_subtitles: bool = False,
     vision_onscreen_subtitles_english: bool = False,
+    overlay_position: OverlayPosition | None = None,
+    overlay_positions: list[OverlayPosition] | None = None,
+    scene_overlay_lines_override: list[str] | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """
     Full pipeline: validate duration → transcribe → SRT → 9:16 + burn-in subs → optional music
@@ -565,11 +635,26 @@ def process_upload(
     vision to read on-screen text into burned-in SRT (needs ``openai_api_key``).
 
     ``vision_onscreen_subtitles_english``: if True with vision subtitles, translate visible text to English.
+
+    ``overlay_position``: default vertical band when a line has no entry in ``overlay_positions``
+    (and for env ``SHORTSAI_OVERLAY_POSITION`` when ``None``).
+
+    ``overlay_positions``: optional list, one ``upper`` / ``middle`` / ``lower`` per timed scene line
+    (after sanitization). Shorter lists are padded with ``overlay_position``.
+
+    ``scene_overlay_lines_override``: if set to a non-empty list of strings, skip vision/text overlay
+    generation and burn these lines instead (e.g. re-export with new positions only).
+    Speech subtitles are unaffected.
     """
     log = progress or (lambda _m: None)
 
     resolved_vertical_fit: VerticalFitMode = (
         vertical_fit if vertical_fit is not None else _coerce_vertical_fit(os.environ.get("SHORTSAI_VERTICAL_FIT"))
+    )
+    resolved_overlay_position: OverlayPosition = (
+        overlay_position
+        if overlay_position is not None
+        else _coerce_overlay_position(os.environ.get("SHORTSAI_OVERLAY_POSITION"))
     )
 
     ffmpeg_util.require_ffmpeg()
@@ -774,7 +859,14 @@ def process_upload(
     # On-screen lines: always scene-based (vision or text). Title/description/tags stay in metadata.json only.
     overlay_texts: list[str] = []
     meta["overlay_text_source"] = None
-    if manual_overlay_text and manual_overlay_text.strip():
+
+    override_raw = (
+        [x for x in (scene_overlay_lines_override or []) if x is not None and str(x).strip()]
+    )
+    if override_raw:
+        overlay_texts = sanitize_overlay_lines([str(x).strip() for x in override_raw])
+        meta["overlay_text_source"] = "override"
+    elif manual_overlay_text and manual_overlay_text.strip():
         overlay_texts = [manual_overlay_text.strip()]
         meta["overlay_text_source"] = "manual"
     else:
@@ -834,10 +926,18 @@ def process_upload(
 
     overlay_texts = sanitize_overlay_lines(overlay_texts)
 
+    per_line_pos = normalize_overlay_line_positions(
+        len(overlay_texts), overlay_positions, resolved_overlay_position
+    )
     meta["on_screen_overlay_lines"] = list(overlay_texts)
+    meta["on_screen_overlay_positions"] = list(per_line_pos)
     meta["scene_overlay_applied"] = False
+    meta["overlay_position"] = resolved_overlay_position
 
-    log(f"Applying scene text overlays… overlay_texts={overlay_texts}")
+    log(
+        f"Applying scene text overlays… overlay_texts={overlay_texts} "
+        f"positions={per_line_pos}"
+    )
     try:
         overlay_video = work_dir / "with_overlays.mp4"
         _add_text_overlay(
@@ -846,6 +946,8 @@ def process_upload(
             overlay_texts=overlay_texts,
             cwd=work_dir,
             progress_emit=log,
+            overlay_position=resolved_overlay_position,
+            overlay_positions=per_line_pos,
         )
         final_video = overlay_video
         meta["scene_overlay_applied"] = True
