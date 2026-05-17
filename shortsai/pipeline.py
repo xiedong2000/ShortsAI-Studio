@@ -77,6 +77,72 @@ def normalize_overlay_line_positions(
     return out
 
 
+def default_overlay_line_times(count: int, duration_sec: float) -> list[tuple[float, float]]:
+    """Equal timeline windows for ``count`` scene lines (same as auto burn-in)."""
+    if count <= 0:
+        return []
+    return [_overlay_text_segment_window(i, count, duration_sec) for i in range(count)]
+
+
+def normalize_overlay_line_times(
+    count: int,
+    times: list[tuple[float, float]] | None,
+    duration_sec: float,
+) -> list[tuple[float, float]]:
+    """Build a length-``count`` list of (start_sec, end_sec); clamp to [0, duration]."""
+    duration_sec = max(0.1, float(duration_sec))
+    if count <= 0:
+        return []
+    defaults = default_overlay_line_times(count, duration_sec)
+    min_gap = 0.12
+    out: list[tuple[float, float]] = []
+    for i in range(count):
+        t0, t1 = defaults[i]
+        if times and i < len(times):
+            try:
+                t0 = float(times[i][0])
+                t1 = float(times[i][1])
+            except (TypeError, ValueError, IndexError):
+                pass
+        t0 = max(0.0, min(t0, duration_sec))
+        t1 = max(0.0, min(t1, duration_sec))
+        if t1 <= t0:
+            t1 = min(duration_sec, t0 + min_gap)
+        if t1 - t0 < min_gap:
+            t1 = min(duration_sec, t0 + min_gap)
+        out.append((t0, t1))
+    return out
+
+
+def overlay_times_to_meta(times: list[tuple[float, float]]) -> list[dict[str, float]]:
+    return [{"start": round(a, 2), "end": round(b, 2)} for a, b in times]
+
+
+def overlay_times_from_meta(
+    raw: Any,
+    *,
+    count: int,
+    duration_sec: float,
+) -> list[tuple[float, float]] | None:
+    """Parse ``on_screen_overlay_times`` from metadata; returns None if unusable."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    parsed: list[tuple[float, float]] = []
+    for item in raw[:count]:
+        try:
+            if isinstance(item, dict):
+                parsed.append((float(item["start"]), float(item["end"])))
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                parsed.append((float(item[0]), float(item[1])))
+            else:
+                return None
+        except (KeyError, TypeError, ValueError):
+            return None
+    if len(parsed) != count:
+        return None
+    return normalize_overlay_line_times(count, parsed, duration_sec)
+
+
 def _overlay_y_expression(position: OverlayPosition) -> str:
     """drawtext y= expression that vertically centers the line at the chosen band."""
     if position == "middle":
@@ -450,12 +516,13 @@ def _add_text_overlay(
     progress_emit: Callable[[str], None],
     overlay_position: OverlayPosition = "middle",
     overlay_positions: list[OverlayPosition] | None = None,
+    overlay_times: list[tuple[float, float]] | None = None,
 ) -> None:
     """Burn scene-based on-screen lines only (title/description/tags stay in metadata, not here).
 
     ``overlay_position`` is the default vertical band when ``overlay_positions`` is shorter than
     the number of lines. ``overlay_positions[i]`` sets the band for timed line ``i`` (upper /
-    middle / lower).
+    middle / lower). ``overlay_times[i]`` is ``(start_sec, end_sec)`` on the video timeline.
     """
     lines = [strip_overlay_quotes(x.strip()) for x in overlay_texts[:4] if x.strip()]
     lines = [x for x in lines if x]
@@ -465,6 +532,7 @@ def _add_text_overlay(
     pos_per_line = normalize_overlay_line_positions(len(lines), overlay_positions, overlay_position)
 
     duration_sec = ffmpeg_util.probe_duration_seconds(video_in)
+    times_per_line = normalize_overlay_line_times(len(lines), overlay_times, duration_sec)
     # drawtext 't' follows stream PTS; align segment windows to real timeline.
     pts0 = ffmpeg_util.probe_video_start_time_seconds(video_in)
     font_clause = _prepare_overlay_font_in_cwd(cwd)
@@ -494,7 +562,7 @@ def _add_text_overlay(
             fontsize=fs_overlay,
             max_lines=2,
         )
-        t0, t1 = _overlay_text_segment_window(idx, n_lines, duration_sec)
+        t0, t1 = times_per_line[idx]
         enable = _drawtext_enable_between(pts0 + t0, pts0 + t1)
         parts = [p.strip() for p in wrapped.split("\n") if p.strip()]
         if not parts:
@@ -616,6 +684,7 @@ def process_upload(
     overlay_position: OverlayPosition | None = None,
     overlay_positions: list[OverlayPosition] | None = None,
     scene_overlay_lines_override: list[str] | None = None,
+    scene_overlay_times_override: list[tuple[float, float]] | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """
     Full pipeline: validate duration → transcribe → SRT → 9:16 + burn-in subs → optional music
@@ -644,6 +713,10 @@ def process_upload(
 
     ``scene_overlay_lines_override``: if set to a non-empty list of strings, skip vision/text overlay
     generation and burn these lines instead (e.g. re-export with new positions only).
+
+    ``scene_overlay_times_override``: optional ``(start_sec, end_sec)`` per line; same order as
+    override lines (or auto-generated lines). Clamped to video duration.
+
     Speech subtitles are unaffected.
     """
     log = progress or (lambda _m: None)
@@ -867,7 +940,7 @@ def process_upload(
         overlay_texts = sanitize_overlay_lines([str(x).strip() for x in override_raw])
         meta["overlay_text_source"] = "override"
     elif manual_overlay_text and manual_overlay_text.strip():
-        overlay_texts = [manual_overlay_text.strip()]
+        overlay_texts = [strip_overlay_quotes(manual_overlay_text.strip())]
         meta["overlay_text_source"] = "manual"
     else:
         spoken = " ".join(x for x in [caption_plain, visual_fallback] if x).strip()
@@ -929,14 +1002,21 @@ def process_upload(
     per_line_pos = normalize_overlay_line_positions(
         len(overlay_texts), overlay_positions, resolved_overlay_position
     )
+    overlay_dur = ffmpeg_util.probe_duration_seconds(final_video)
+    per_line_times = normalize_overlay_line_times(
+        len(overlay_texts),
+        scene_overlay_times_override,
+        overlay_dur,
+    )
     meta["on_screen_overlay_lines"] = list(overlay_texts)
     meta["on_screen_overlay_positions"] = list(per_line_pos)
+    meta["on_screen_overlay_times"] = overlay_times_to_meta(per_line_times)
     meta["scene_overlay_applied"] = False
     meta["overlay_position"] = resolved_overlay_position
 
     log(
         f"Applying scene text overlays… overlay_texts={overlay_texts} "
-        f"positions={per_line_pos}"
+        f"positions={per_line_pos} times={per_line_times}"
     )
     try:
         overlay_video = work_dir / "with_overlays.mp4"
@@ -948,6 +1028,7 @@ def process_upload(
             progress_emit=log,
             overlay_position=resolved_overlay_position,
             overlay_positions=per_line_pos,
+            overlay_times=per_line_times,
         )
         final_video = overlay_video
         meta["scene_overlay_applied"] = True

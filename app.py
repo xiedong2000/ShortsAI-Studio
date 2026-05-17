@@ -19,7 +19,9 @@ from shortsai.pipeline import (
     VerticalFitMode,
     OverlayPosition,
     coerce_overlay_position,
+    default_overlay_line_times,
     metadata_to_json_bytes,
+    overlay_times_from_meta,
     process_upload,
 )
 
@@ -329,26 +331,82 @@ def _scene_positions_for_reexport(meta: dict[str, Any], ov_lines: list[str]) -> 
     return None
 
 
-def _read_scene_editors(n: int) -> tuple[list[str], list[OverlayPosition]] | None:
+def _read_scene_editors(
+    n: int, duration_sec: float
+) -> tuple[list[str], list[OverlayPosition], list[tuple[float, float]]] | None:
     """
-    Read per-line text + vertical band from Step 4 widgets. Empty text rows are dropped together
-    with their band (remaining lines keep order; time windows shrink to match).
+    Read per-line text, vertical band, and timing from Step 4 widgets. Empty text rows are dropped
+    together with their band and time window.
     """
     if n <= 0:
         return None
     try:
         raw_t = [str(st.session_state[f"otext_sb_{i}"]).strip() for i in range(n)]
         raw_p = [cast(OverlayPosition, st.session_state[f"opos_sb_{i}"]) for i in range(n)]
+        raw_times = [
+            (
+                float(st.session_state[f"ostart_sb_{i}"]),
+                float(st.session_state[f"oend_sb_{i}"]),
+            )
+            for i in range(n)
+        ]
     except KeyError:
         return None
-    pairs: list[tuple[str, OverlayPosition]] = []
-    for t, p in zip(raw_t, raw_p):
+    triples: list[tuple[str, OverlayPosition, tuple[float, float]]] = []
+    for t, p, tw in zip(raw_t, raw_p, raw_times):
         cleaned = strip_overlay_quotes(t).strip()
         if cleaned:
-            pairs.append((cleaned, p))
-    if not pairs:
+            triples.append((cleaned, p, tw))
+    if not triples:
         return None
-    return ([a for a, _ in pairs], [b for _, b in pairs])
+    return (
+        [a for a, _, _ in triples],
+        [b for _, b, _ in triples],
+        [c for _, _, c in triples],
+    )
+
+
+def _whisper_cache_for_reexport(meta: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Session cache first, then metadata from the last successful export."""
+    cache = st.session_state.get(_SS_WHISPER_CACHE)
+    if isinstance(cache, dict):
+        return cache
+    if meta and isinstance(meta.get("whisper_cache"), dict):
+        return meta["whisper_cache"]
+    return None
+
+
+def _reuse_whisper_cache_arg(meta: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Only pass a cache when it has word timings (skips Whisper). Otherwise pipeline re-transcribes."""
+    cache = _whisper_cache_for_reexport(meta)
+    if not isinstance(cache, dict):
+        return None
+    words = cache.get("words")
+    if isinstance(words, list) and len(words) > 0:
+        return cache
+    return None
+
+
+def _sync_whisper_cache_from_meta(meta: dict[str, Any]) -> None:
+    wc = meta.get("whisper_cache")
+    if isinstance(wc, dict):
+        st.session_state[_SS_WHISPER_CACHE] = wc
+
+
+def _overlay_times_fingerprint(meta: dict[str, Any]) -> tuple[tuple[float, float], ...]:
+    raw = meta.get("on_screen_overlay_times")
+    if not isinstance(raw, list):
+        return ()
+    out: list[tuple[float, float]] = []
+    for item in raw:
+        try:
+            if isinstance(item, dict):
+                out.append((float(item["start"]), float(item["end"])))
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                out.append((float(item[0]), float(item[1])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return tuple(out)
 
 
 def _step_footer(step: int) -> None:
@@ -711,21 +769,44 @@ def main() -> None:
         if mp4_bytes is None or meta is None:
             st.info("Nothing here yet — use **Step 3 · Generate Short** above. After a successful run, results appear here.")
         else:
+            _sync_whisper_cache_from_meta(meta)
             ov_lines_result = list(meta.get("on_screen_overlay_lines") or [])
-            fpr_ov = ("ov_pos_ui", tuple(ov_lines_result))
+            clip_dur = float(meta.get("duration_seconds") or MAX_DURATION_SEC)
+            fpr_ov = (
+                "ov_pos_ui",
+                tuple(ov_lines_result),
+                _overlay_times_fingerprint(meta),
+            )
             if st.session_state.get("_ov_pos_ui_fpr") != fpr_ov:
                 st.session_state["_ov_pos_ui_fpr"] = fpr_ov
                 prev_ov = meta.get("on_screen_overlay_positions")
+                prev_times = overlay_times_from_meta(
+                    meta.get("on_screen_overlay_times"),
+                    count=len(ov_lines_result),
+                    duration_sec=clip_dur,
+                )
+                if prev_times is None and ov_lines_result:
+                    prev_times = default_overlay_line_times(len(ov_lines_result), clip_dur)
                 for j in range(16):
                     st.session_state.pop(f"opos_sb_{j}", None)
                     st.session_state.pop(f"otext_sb_{j}", None)
+                    st.session_state.pop(f"ostart_sb_{j}", None)
+                    st.session_state.pop(f"oend_sb_{j}", None)
                 ddef = coerce_overlay_position(st.session_state.get(_SS_OVERLAY_DEFAULT, "middle"))
                 for i in range(len(ov_lines_result)):
                     d = ddef
                     if isinstance(prev_ov, list) and i < len(prev_ov):
                         d = coerce_overlay_position(str(prev_ov[i]))
                     st.session_state[f"opos_sb_{i}"] = d
-                    st.session_state[f"otext_sb_{i}"] = ov_lines_result[i]
+                    st.session_state[f"otext_sb_{i}"] = strip_overlay_quotes(
+                        str(ov_lines_result[i])
+                    )
+                    if prev_times and i < len(prev_times):
+                        st.session_state[f"ostart_sb_{i}"] = float(prev_times[i][0])
+                        st.session_state[f"oend_sb_{i}"] = float(prev_times[i][1])
+                    else:
+                        st.session_state[f"ostart_sb_{i}"] = 0.0
+                        st.session_state[f"oend_sb_{i}"] = clip_dur
 
             c_clear, _ = st.columns([1, 3])
             with c_clear:
@@ -803,11 +884,10 @@ def main() -> None:
                     )
                     re_go = st.form_submit_button("Re-export MP4 with edited captions")
                 if re_go:
-                    cache = st.session_state.get(_SS_WHISPER_CACHE)
-                    if not isinstance(cache, dict) or not cache.get("words"):
+                    if not st.session_state.get(_SS_UPLOAD_BYTES):
                         st.error(
-                            "Whisper cache is missing (e.g. after **Clear results**). "
-                            "Run **Generate Short** in Step 3 once, then edit and re-export here."
+                            "Upload missing — select your video again in **Step 1**, or run "
+                            "**Generate Short** in Step 3."
                         )
                     elif not edited_srt.strip() or "-->" not in edited_srt:
                         st.error("SRT looks empty or invalid (each cue needs a `-->` timestamp line).")
@@ -830,16 +910,23 @@ def main() -> None:
                                 model = _whisper_model()
                                 srt_scene_lines: list[str] | None = None
                                 pos_r: list[OverlayPosition] | None = None
+                                times_r: list[tuple[float, float]] | None = None
                                 srt_manual: str | None = None
                                 if ov_lines_result:
-                                    ed_srt = _read_scene_editors(len(ov_lines_result))
+                                    ed_srt = _read_scene_editors(
+                                        len(ov_lines_result), clip_dur
+                                    )
                                     if ed_srt:
-                                        srt_scene_lines, pos_r = ed_srt
+                                        srt_scene_lines, pos_r, times_r = ed_srt
                                     else:
                                         pos_r = _scene_positions_for_reexport(
                                             meta, ov_lines_result
                                         )
-                                        srt_scene_lines = ov_lines_result
+                                        srt_scene_lines = [
+                                            strip_overlay_quotes(str(x))
+                                            for x in ov_lines_result
+                                            if strip_overlay_quotes(str(x))
+                                        ]
                                 if not srt_scene_lines:
                                     srt_manual = (st.session_state.get(_SS_MANUAL_OVERLAY) or "").strip() or None
                                 with st.spinner("Re-exporting with your SRT…"):
@@ -858,7 +945,7 @@ def main() -> None:
                                         or None,
                                         vertical_fit=cast(VerticalFitMode, st.session_state[_SS_VERTICAL_FIT]),
                                         caption_srt_override=edited_srt.strip(),
-                                        reuse_whisper_cache=cache,
+                                        reuse_whisper_cache=_reuse_whisper_cache_arg(meta),
                                         vision_onscreen_subtitles=bool(
                                             st.session_state.get(_SS_VISION_ONSCREEN_SUBS)
                                         ),
@@ -870,6 +957,7 @@ def main() -> None:
                                         ),
                                         overlay_positions=pos_r,
                                         scene_overlay_lines_override=srt_scene_lines,
+                                        scene_overlay_times_override=times_r,
                                     )
                                 if music_re is not None:
                                     meta2["music_file"] = music_re.name
@@ -886,19 +974,40 @@ def main() -> None:
                                 shutil.rmtree(work2, ignore_errors=True)
 
             if ov_lines_result:
-                with st.expander("Scene text — edit wording & vertical position", expanded=False):
+                with st.expander(
+                    "Scene text — edit wording, timing & vertical position",
+                    expanded=False,
+                ):
                     st.caption(
-                        "Edit **red timed** scene lines and their band (upper / middle / lower). "
-                        "Clear a line’s text to drop that beat (later lines move up in the timeline). "
-                        "Re-export skips Whisper when the word cache is present."
+                        f"Edit **red timed** scene lines, **start/end seconds** (0–{clip_dur:.1f}s), "
+                        "and vertical band. Clear text to drop a beat. Re-export skips Whisper when the cache is present."
                     )
                     for i in range(len(ov_lines_result)):
                         st.text_area(
                             f"Line {i + 1} — text",
                             key=f"otext_sb_{i}",
                             height=68,
-                            help="Shown during this line’s time slot. Leave empty to remove this slot.",
+                            help="Leave empty to remove this slot.",
                         )
+                        tc1, tc2 = st.columns(2)
+                        with tc1:
+                            st.number_input(
+                                "Start (s)",
+                                min_value=0.0,
+                                max_value=clip_dur,
+                                step=0.1,
+                                format="%.1f",
+                                key=f"ostart_sb_{i}",
+                            )
+                        with tc2:
+                            st.number_input(
+                                "End (s)",
+                                min_value=0.0,
+                                max_value=clip_dur,
+                                step=0.1,
+                                format="%.1f",
+                                key=f"oend_sb_{i}",
+                            )
                         st.selectbox(
                             "Vertical band",
                             options=("upper", "middle", "lower"),
@@ -912,33 +1021,41 @@ def main() -> None:
                         st.markdown("---")
 
                     if st.button("Re-export MP4 with edited scene text", key="btn_reexport_scene_pos"):
-                        cache2 = st.session_state.get(_SS_WHISPER_CACHE)
-                        if not isinstance(cache2, dict) or not cache2.get("words"):
+                        ub2 = st.session_state.get(_SS_UPLOAD_BYTES)
+                        if not ub2:
                             st.error(
-                                "Whisper cache is missing. Run **Generate Short** in Step 3 once, then try again."
+                                "Upload missing — select your video again in **Step 1**, or run "
+                                "**Generate Short** in Step 3."
                             )
                         else:
-                            ub2 = st.session_state.get(_SS_UPLOAD_BYTES)
-                            if not ub2:
-                                st.error("Upload missing — select your video again in Step 1.")
-                            else:
-                                music_re2: Path | None = None
-                                pick2 = st.session_state.get(_SS_MUSIC_PICK, "None")
-                                if pick2 and pick2 != "None" and music_files:
-                                    for p in music_files:
-                                        if p.name == pick2:
-                                            music_re2 = p
-                                            break
-                                work3 = Path(tempfile.mkdtemp(prefix="shortsai_re_scene_"))
-                                try:
-                                    src3 = work3 / f"upload{Path(upload_name).suffix or '.mp4'}"
-                                    src3.write_bytes(ub2)
-                                    model = _whisper_model()
-                                    ed3 = _read_scene_editors(len(ov_lines_result))
-                                    if ed3 is None:
-                                        st.error("Could not read scene text from the form.")
+                            reuse_cache = _reuse_whisper_cache_arg(meta)
+                            if reuse_cache is None and (meta.get("speech_srt") or "").strip():
+                                st.caption(
+                                    "No speech word cache — re-export will reuse your saved captions "
+                                    "and may take longer if speech is re-analyzed."
+                                )
+                            music_re2: Path | None = None
+                            pick2 = st.session_state.get(_SS_MUSIC_PICK, "None")
+                            if pick2 and pick2 != "None" and music_files:
+                                for p in music_files:
+                                    if p.name == pick2:
+                                        music_re2 = p
+                                        break
+                            work3 = Path(tempfile.mkdtemp(prefix="shortsai_re_scene_"))
+                            try:
+                                src3 = work3 / f"upload{Path(upload_name).suffix or '.mp4'}"
+                                src3.write_bytes(ub2)
+                                model = _whisper_model()
+                                ed3 = _read_scene_editors(len(ov_lines_result), clip_dur)
+                                if ed3 is None:
+                                    st.error("Could not read scene text from the form.")
+                                else:
+                                    lines_use, pos_use, times_use = ed3
+                                    if any(t1 <= t0 for t0, t1 in times_use):
+                                        st.error(
+                                            "Each line needs **End (s)** greater than **Start (s)**."
+                                        )
                                     else:
-                                        lines_use, pos_use = ed3
                                         srt_keep = (meta.get("speech_srt") or "").strip()
                                         with st.spinner("Re-exporting scene text…"):
                                             mp4_b3, meta3 = process_upload(
@@ -950,7 +1067,9 @@ def main() -> None:
                                                 ),
                                                 openai_api_key=api_key.strip() or None,
                                                 music_path=music_re2,
-                                                music_volume=float(st.session_state[_SS_MUSIC_VOL]),
+                                                music_volume=float(
+                                                    st.session_state[_SS_MUSIC_VOL]
+                                                ),
                                                 manual_overlay_text=None,
                                                 progress=None,
                                                 whisper_task=st.session_state[_SS_WHISPER_TASK],
@@ -959,15 +1078,18 @@ def main() -> None:
                                                 ).strip()
                                                 or None,
                                                 vertical_fit=cast(
-                                                    VerticalFitMode, st.session_state[_SS_VERTICAL_FIT]
+                                                    VerticalFitMode,
+                                                    st.session_state[_SS_VERTICAL_FIT],
                                                 ),
                                                 caption_srt_override=srt_keep if srt_keep else None,
-                                                reuse_whisper_cache=cache2,
+                                                reuse_whisper_cache=reuse_cache,
                                                 vision_onscreen_subtitles=bool(
                                                     st.session_state.get(_SS_VISION_ONSCREEN_SUBS)
                                                 ),
                                                 vision_onscreen_subtitles_english=bool(
-                                                    st.session_state.get(_SS_VISION_ONSCREEN_EN)
+                                                    st.session_state.get(
+                                                        _SS_VISION_ONSCREEN_EN
+                                                    )
                                                 ),
                                                 overlay_position=cast(
                                                     OverlayPosition,
@@ -975,20 +1097,23 @@ def main() -> None:
                                                 ),
                                                 overlay_positions=pos_use,
                                                 scene_overlay_lines_override=lines_use,
+                                                scene_overlay_times_override=times_use,
                                             )
                                         if music_re2 is not None:
                                             meta3["music_file"] = music_re2.name
                                         else:
                                             meta3["music_file"] = None
-                                        st.session_state[_SS_WHISPER_CACHE] = meta3.get("whisper_cache")
+                                        st.session_state[_SS_WHISPER_CACHE] = meta3.get(
+                                            "whisper_cache"
+                                        )
                                         st.session_state[_SS_MP4] = mp4_b3
                                         st.session_state[_SS_META] = meta3
                                         st.success("Re-export complete.")
                                         st.rerun()
-                                except Exception as e:
-                                    st.exception(e)
-                                finally:
-                                    shutil.rmtree(work3, ignore_errors=True)
+                            except Exception as e:
+                                st.exception(e)
+                            finally:
+                                shutil.rmtree(work3, ignore_errors=True)
 
             st.caption(
                 "Copy the fields below into YouTube Studio → your short → **Details**. "

@@ -10,35 +10,7 @@ from openai import OpenAI
 
 from . import ffmpeg_util
 from .srt_build import equal_segments_srt
-
-# Double quotes + guillemets: remove everywhere (model often wraps lines in "..." or „…").
-_OVERLAY_QUOTE_GLOBAL = frozenset(
-    "\""
-    "\u201c\u201d"  # “ ”
-    "\u201e\u201f"  # „ ‟
-    "\uff02"  # ＂ fullwidth
-    "\u00ab\u00bb"  # « »
-    "\u2039\u203a"  # ‹ ›
-)
-# Singles: strip only from line ends so internal apostrophes (It's) stay intact.
-_OVERLAY_QUOTE_EDGE_SINGLE = frozenset("'\u2018\u2019\u201a\u201b")
-
-
-def strip_overlay_quotes(s: str) -> str:
-    """Remove wrapping and decorative quotes from a single overlay line."""
-    s = (s or "").strip()
-    s = "".join(c for c in s if c not in _OVERLAY_QUOTE_GLOBAL)
-    s = s.strip()
-    while s and s[0] in _OVERLAY_QUOTE_EDGE_SINGLE:
-        s = s[1:].strip()
-    while s and s[-1] in _OVERLAY_QUOTE_EDGE_SINGLE:
-        s = s[:-1].strip()
-    return s
-
-
-def sanitize_overlay_lines(lines: list[str]) -> list[str]:
-    """Strip quotes from each line and drop empties."""
-    return [x for x in (strip_overlay_quotes(t) for t in lines) if x]
+from .text_sanitize import sanitize_overlay_lines, strip_overlay_quotes
 
 
 def _fallback_metadata(transcript: str) -> dict[str, Any]:

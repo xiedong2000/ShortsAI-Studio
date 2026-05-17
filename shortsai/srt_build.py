@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from shortsai.text_sanitize import strip_overlay_quotes
 from shortsai.transcribe import WordSpan
 
 
@@ -51,7 +52,7 @@ def words_to_srt(
         nonlocal buf, t0, t1
         if not buf:
             return
-        line = " ".join(buf).strip()
+        line = strip_overlay_quotes(" ".join(buf).strip())
         if line:
             cues.append((t0, t1, line))
         buf = []
@@ -87,7 +88,11 @@ def equal_segments_srt(lines: list[str], duration_sec: float, *, max_chars: int 
     Build SRT with one cue per segment, splitting [0, duration_sec] into equal windows.
     Used when timings come from video segments (e.g. vision-read on-screen text), not Whisper words.
     """
-    cleaned = [str(x).strip() for x in lines if str(x).strip()]
+    cleaned = [
+        strip_overlay_quotes(str(x).strip())
+        for x in lines
+        if strip_overlay_quotes(str(x).strip())
+    ]
     if not cleaned or duration_sec <= 0:
         return ""
     n = len(cleaned)
