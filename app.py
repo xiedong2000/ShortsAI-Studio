@@ -46,6 +46,7 @@ _SS_VERTICAL_FIT = "vertical_fit_ui"
 _SS_WHISPER_CACHE = "whisper_word_cache"
 _SS_VISION_ONSCREEN_SUBS = "vision_onscreen_subs"
 _SS_VISION_ONSCREEN_EN = "vision_onscreen_en"
+_SS_AI_HOOK = "ai_hook_cold_open"
 _CURRENT_STEP = "current_step"
 _SS_OVERLAY_DEFAULT = "overlay_default_pos"
 _SS_OVERLAY_POSITIONS_CSV = "overlay_positions_csv"
@@ -280,6 +281,8 @@ def _init_session_defaults() -> None:
         st.session_state[_SS_VISION_ONSCREEN_SUBS] = False
     if _SS_VISION_ONSCREEN_EN not in st.session_state:
         st.session_state[_SS_VISION_ONSCREEN_EN] = False
+    if _SS_AI_HOOK not in st.session_state:
+        st.session_state[_SS_AI_HOOK] = False
     if _CURRENT_STEP not in st.session_state:
         st.session_state[_CURRENT_STEP] = 1
     if _SS_OVERLAY_DEFAULT not in st.session_state:
@@ -635,6 +638,20 @@ def main() -> None:
             key=_SS_SPEECH_HINT,
         )
         st.checkbox(
+            "AI hook cold open (~5s best moment first, then the clip from the start)",
+            key=_SS_AI_HOOK,
+            help=(
+                "Uses OpenAI vision to pick a short eye-catching segment from your upload and "
+                "plays it before the rest (total length still ≤ 60s). Needs OPENAI_API_KEY; "
+                "without a key, uses a simple mid-clip heuristic. Set SHORTSAI_AI_HOOK_SEC in .env "
+                "to change hook length (3–8s)."
+            ),
+        )
+        if st.session_state.get(_SS_AI_HOOK) and not api_key:
+            st.caption(
+                "No API key — hook placement uses a simple heuristic, not vision scoring."
+            )
+        st.checkbox(
             "Music / little speech: build burned-in captions from on-screen text (OpenAI vision; needs API key)",
             key=_SS_VISION_ONSCREEN_SUBS,
             help="When Whisper finds no or very few words, read visible lyrics/titles from the source video and "
@@ -726,6 +743,7 @@ def main() -> None:
                         vision_onscreen_subtitles_english=bool(st.session_state.get(_SS_VISION_ONSCREEN_EN)),
                         overlay_position=cast(OverlayPosition, st.session_state[_SS_OVERLAY_DEFAULT]),
                         overlay_positions=csv_pos,
+                        ai_hook_cold_open=bool(st.session_state.get(_SS_AI_HOOK)),
                     )
                     if music_choice is not None:
                         meta["music_file"] = music_choice.name
@@ -840,6 +858,14 @@ def main() -> None:
                 st.warning(
                     "Timed **scene text overlays** were not burned in (FFmpeg/drawtext issue). "
                     f"Speech captions still apply if present. {('Details: ' + err[:280]) if err else ''}"
+                )
+
+            hook_info = meta.get("ai_hook")
+            if isinstance(hook_info, dict) and hook_info.get("applied"):
+                st.info(
+                    f"**AI hook** prepended {hook_info.get('hook_sec', '?')}s from source "
+                    f"{hook_info.get('source_start', '?')}s–{hook_info.get('source_end', '?')}s "
+                    f"({hook_info.get('method', '')}: {hook_info.get('reason', '')})."
                 )
 
             st.markdown("##### Output video")
@@ -958,6 +984,10 @@ def main() -> None:
                                         overlay_positions=pos_r,
                                         scene_overlay_lines_override=srt_scene_lines,
                                         scene_overlay_times_override=times_r,
+                                        ai_hook_cold_open=bool(st.session_state.get(_SS_AI_HOOK)),
+                                        ai_hook_meta=meta.get("ai_hook")
+                                        if isinstance(meta.get("ai_hook"), dict)
+                                        else None,
                                     )
                                 if music_re is not None:
                                     meta2["music_file"] = music_re.name
@@ -1098,6 +1128,12 @@ def main() -> None:
                                                 overlay_positions=pos_use,
                                                 scene_overlay_lines_override=lines_use,
                                                 scene_overlay_times_override=times_use,
+                                                ai_hook_cold_open=bool(
+                                                    st.session_state.get(_SS_AI_HOOK)
+                                                ),
+                                                ai_hook_meta=meta.get("ai_hook")
+                                                if isinstance(meta.get("ai_hook"), dict)
+                                                else None,
                                             )
                                         if music_re2 is not None:
                                             meta3["music_file"] = music_re2.name

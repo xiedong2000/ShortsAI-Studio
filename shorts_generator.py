@@ -150,6 +150,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="How landscape clips fit 9:16 (default: env SHORTSAI_VERTICAL_FIT or crop).",
     )
     p.add_argument(
+        "--ai-hook",
+        action="store_true",
+        help=(
+            "Prepend a ~5s AI-picked cold open from the source, then the clip from the start "
+            "(total ≤ 60s). Vision needs OPENAI_API_KEY; else uses a heuristic."
+        ),
+    )
+    p.add_argument(
         "--vision-onscreen-captions",
         action="store_true",
         help="When speech is missing or very thin, burn subtitles from on-screen text (OpenAI vision; needs key).",
@@ -311,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
             vision_onscreen_subtitles_english=bool(args.vision_onscreen_captions_english),
             overlay_position=overlay_pos_default,
             overlay_positions=overlay_pos_list,
+            ai_hook_cold_open=bool(args.ai_hook),
         )
         if music_path is not None:
             meta["music_file"] = music_path.name

@@ -19,6 +19,13 @@ from shortsai.metadata_llm import (
     sanitize_overlay_lines,
     strip_overlay_quotes,
 )
+from shortsai.hook_clip import (
+    apply_hook_cold_open,
+    hook_duration_from_env,
+    hook_selection_from_meta,
+    hook_selection_to_meta,
+    select_hook_window,
+)
 from shortsai.srt_build import words_to_srt
 from shortsai.transcribe import TranscriptResult, WordSpan, transcribe
 
@@ -685,6 +692,8 @@ def process_upload(
     overlay_positions: list[OverlayPosition] | None = None,
     scene_overlay_lines_override: list[str] | None = None,
     scene_overlay_times_override: list[tuple[float, float]] | None = None,
+    ai_hook_cold_open: bool = False,
+    ai_hook_meta: dict[str, Any] | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """
     Full pipeline: validate duration → transcribe → SRT → 9:16 + burn-in subs → optional music
@@ -717,6 +726,11 @@ def process_upload(
     ``scene_overlay_times_override``: optional ``(start_sec, end_sec)`` per line; same order as
     override lines (or auto-generated lines). Clamped to video duration.
 
+    ``ai_hook_cold_open``: prepend a short AI-picked clip from the source as a cold open (needs
+    ``openai_api_key`` for vision; heuristic fallback without). Total length stays ≤ ``MAX_DURATION_SEC``
+    (hook + trimmed main). Pass prior ``ai_hook`` metadata via ``ai_hook_meta`` to reuse the same window
+    on re-export.
+
     Speech subtitles are unaffected.
     """
     log = progress or (lambda _m: None)
@@ -739,6 +753,47 @@ def process_upload(
     stem = "src" + input_video.suffix.lower()
     local_in = work_dir / stem
     shutil.copy2(input_video, local_in)
+
+    ai_hook_block: dict[str, Any] = {"applied": False}
+    if ai_hook_cold_open:
+        hook_len = hook_duration_from_env()
+        prior = hook_selection_from_meta(ai_hook_meta) if ai_hook_meta else None
+        if prior:
+            log(
+                f"AI hook: reusing {prior.start:.2f}s–{prior.end:.2f}s from prior export "
+                f"({prior.reason or prior.method})."
+            )
+            hook_sel = prior
+        else:
+            log(f"AI hook: scanning source for a {hook_len:.1f}s cold open…")
+            hook_sel = select_hook_window(
+                local_in,
+                work_dir,
+                duration_sec=dur,
+                hook_len=hook_len,
+                api_key=openai_api_key,
+                log=log,
+            )
+        if hook_sel:
+            hooked_path = work_dir / "with_hook_src.mp4"
+            try:
+                out_dur = apply_hook_cold_open(
+                    local_in,
+                    hooked_path,
+                    hook=hook_sel,
+                    hook_len=hook_len,
+                    max_output_sec=MAX_DURATION_SEC,
+                    cwd=work_dir,
+                )
+                local_in = hooked_path
+                dur = out_dur
+                ai_hook_block = hook_selection_to_meta(
+                    hook_sel, hook_len=hook_len, output_duration=out_dur
+                )
+                log(f"AI hook applied; timeline is now {dur:.2f}s.")
+            except ffmpeg_util.FFmpegError as e:
+                log(f"AI hook failed ({str(e)[:200]}); continuing with original clip.")
+                ai_hook_block = {"applied": False, "error": str(e)[:300]}
 
     log("Extracting audio…")
     wav = work_dir / "speech.wav"
@@ -927,6 +982,7 @@ def process_upload(
     meta["visual_description"] = visual_fallback
     meta["language"] = tr.language
     meta["duration_seconds"] = round(dur, 2)
+    meta["ai_hook"] = ai_hook_block
     meta["vertical_fit"] = resolved_vertical_fit
 
     # On-screen lines: always scene-based (vision or text). Title/description/tags stay in metadata.json only.
