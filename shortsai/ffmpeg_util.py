@@ -224,8 +224,15 @@ def extract_jpeg_frames_per_segment(
         t0 = dur * i / n_segments
         t1 = dur * (i + 1) / n_segments
         span = t1 - t0
-        # Two samples per segment if long enough; else center of segment
-        fracs = (0.35, 0.65) if span >= 1.0 else (0.5,)
+        # Two samples per segment if long enough; last segment also samples near the end (finale)
+        if i == n_segments - 1 and span >= 1.2:
+            fracs = (0.35, 0.65, 0.9)
+        elif i == n_segments - 1:
+            fracs = (0.5, 0.88)
+        elif span >= 1.0:
+            fracs = (0.35, 0.65)
+        else:
+            fracs = (0.5,)
         group: list[Path] = []
         for j, frac in enumerate(fracs):
             t = t0 + frac * span

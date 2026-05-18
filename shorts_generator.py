@@ -150,6 +150,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="How landscape clips fit 9:16 (default: env SHORTSAI_VERTICAL_FIT or crop).",
     )
     p.add_argument(
+        "--ai-narration",
+        action="store_true",
+        help=(
+            "Add English AI voiceover (GPT script + OpenAI TTS); ducks original speech. "
+            "Needs OPENAI_API_KEY."
+        ),
+    )
+    p.add_argument(
+        "--narration-volume",
+        type=float,
+        default=None,
+        metavar="GAIN",
+        help=(
+            "AI narration mix gain 0.25–3.0 (default: env SHORTSAI_NARRATION_VOL or 1.45)."
+        ),
+    )
+    p.add_argument(
         "--ai-hook",
         action="store_true",
         help=(
@@ -320,6 +337,8 @@ def main(argv: list[str] | None = None) -> int:
             overlay_position=overlay_pos_default,
             overlay_positions=overlay_pos_list,
             ai_hook_cold_open=bool(args.ai_hook),
+            ai_narration=bool(args.ai_narration),
+            narration_volume=args.narration_volume,
         )
         if music_path is not None:
             meta["music_file"] = music_path.name

@@ -47,6 +47,8 @@ _SS_WHISPER_CACHE = "whisper_word_cache"
 _SS_VISION_ONSCREEN_SUBS = "vision_onscreen_subs"
 _SS_VISION_ONSCREEN_EN = "vision_onscreen_en"
 _SS_AI_HOOK = "ai_hook_cold_open"
+_SS_AI_NARRATION = "ai_narration"
+_SS_NARRATION_VOL = "narration_vol"
 _CURRENT_STEP = "current_step"
 _SS_OVERLAY_DEFAULT = "overlay_default_pos"
 _SS_OVERLAY_POSITIONS_CSV = "overlay_positions_csv"
@@ -283,6 +285,12 @@ def _init_session_defaults() -> None:
         st.session_state[_SS_VISION_ONSCREEN_EN] = False
     if _SS_AI_HOOK not in st.session_state:
         st.session_state[_SS_AI_HOOK] = False
+    if _SS_AI_NARRATION not in st.session_state:
+        st.session_state[_SS_AI_NARRATION] = False
+    if _SS_NARRATION_VOL not in st.session_state:
+        from shortsai.narration import narration_volume_from_env
+
+        st.session_state[_SS_NARRATION_VOL] = narration_volume_from_env()
     if _CURRENT_STEP not in st.session_state:
         st.session_state[_CURRENT_STEP] = 1
     if _SS_OVERLAY_DEFAULT not in st.session_state:
@@ -652,6 +660,28 @@ def main() -> None:
                 "No API key — hook placement uses a simple heuristic, not vision scoring."
             )
         st.checkbox(
+            "AI narration voiceover (English script + OpenAI TTS; ducks original speech)",
+            key=_SS_AI_NARRATION,
+            help=(
+                "Splits the clip into equal time segments (~few lines per minute), writes one line per "
+                "segment from vision, and speaks it during that window (the finale line is aligned toward "
+                "the end). Not beat-synced to every action. Requires OPENAI_API_KEY."
+            ),
+        )
+        if st.session_state.get(_SS_AI_NARRATION) and not api_key:
+            st.caption("Set OPENAI_API_KEY in .env to enable AI narration.")
+        st.slider(
+            "Narration volume (voiceover loudness)",
+            0.5,
+            2.5,
+            step=0.05,
+            key=_SS_NARRATION_VOL,
+            help=(
+                "Boosts the AI narrator in the final mix (original speech stays ducked). "
+                "Default ~1.45; set SHORTSAI_NARRATION_VOL in .env for a permanent default."
+            ),
+        )
+        st.checkbox(
             "Music / little speech: build burned-in captions from on-screen text (OpenAI vision; needs API key)",
             key=_SS_VISION_ONSCREEN_SUBS,
             help="When Whisper finds no or very few words, read visible lyrics/titles from the source video and "
@@ -744,6 +774,8 @@ def main() -> None:
                         overlay_position=cast(OverlayPosition, st.session_state[_SS_OVERLAY_DEFAULT]),
                         overlay_positions=csv_pos,
                         ai_hook_cold_open=bool(st.session_state.get(_SS_AI_HOOK)),
+                        ai_narration=bool(st.session_state.get(_SS_AI_NARRATION)),
+                        narration_volume=float(st.session_state[_SS_NARRATION_VOL]),
                     )
                     if music_choice is not None:
                         meta["music_file"] = music_choice.name
@@ -867,6 +899,29 @@ def main() -> None:
                     f"{hook_info.get('source_start', '?')}s–{hook_info.get('source_end', '?')}s "
                     f"({hook_info.get('method', '')}: {hook_info.get('reason', '')})."
                 )
+            narr_info = meta.get("ai_narration")
+            if isinstance(narr_info, dict) and narr_info.get("applied"):
+                src = narr_info.get("source") or "scene_timed"
+                segs = narr_info.get("segment_lines")
+                if isinstance(segs, list) and segs:
+                    with st.expander(
+                        f"AI narration ({narr_info.get('voice', 'alloy')}, {src}) — "
+                        f"{len(segs)} timed lines",
+                        expanded=False,
+                    ):
+                        for seg in segs:
+                            if isinstance(seg, dict):
+                                st.caption(
+                                    f"{seg.get('start', '?')}s – {seg.get('end', '?')}s"
+                                )
+                                st.write(seg.get("text", ""))
+                else:
+                    st.info(
+                        f"**AI narration** (voice: {narr_info.get('voice', 'alloy')}) — "
+                        f"{str(narr_info.get('script', ''))[:200]}"
+                    )
+            elif isinstance(narr_info, dict) and narr_info.get("error"):
+                st.caption(f"AI narration was not applied: {narr_info.get('error', '')[:200]}")
 
             st.markdown("##### Output video")
             st.video(mp4_bytes, format="video/mp4")
@@ -988,6 +1043,10 @@ def main() -> None:
                                         ai_hook_meta=meta.get("ai_hook")
                                         if isinstance(meta.get("ai_hook"), dict)
                                         else None,
+                                        ai_narration=bool(st.session_state.get(_SS_AI_NARRATION)),
+                                        narration_volume=float(
+                                            st.session_state[_SS_NARRATION_VOL]
+                                        ),
                                     )
                                 if music_re is not None:
                                     meta2["music_file"] = music_re.name
@@ -1134,6 +1193,12 @@ def main() -> None:
                                                 ai_hook_meta=meta.get("ai_hook")
                                                 if isinstance(meta.get("ai_hook"), dict)
                                                 else None,
+                                                ai_narration=bool(
+                                                    st.session_state.get(_SS_AI_NARRATION)
+                                                ),
+                                                narration_volume=float(
+                                                    st.session_state[_SS_NARRATION_VOL]
+                                                ),
                                             )
                                         if music_re2 is not None:
                                             meta3["music_file"] = music_re2.name
@@ -1160,7 +1225,12 @@ def main() -> None:
                 st.caption(f"Metadata source: `{src}`")
             bsrc = meta.get("burned_subtitle_source")
             if isinstance(bsrc, str) and bsrc:
-                st.caption(f"Burned-in speech caption source: `{bsrc}`")
+                label = (
+                    "Burned-in captions (AI narration text)"
+                    if bsrc == "ai_narration"
+                    else f"Burned-in caption source: `{bsrc}`"
+                )
+                st.caption(label)
 
             st.markdown("##### Title")
             title = meta.get("title") or ""

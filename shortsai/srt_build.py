@@ -109,3 +109,23 @@ def equal_segments_srt(lines: list[str], duration_sec: float, *, max_chars: int 
         blocks.append(f"{idx}\n{_format_ts(t0)} --> {_format_ts(t1)}\n{body}\n")
         idx += 1
     return "\n".join(blocks)
+
+
+def segment_timed_srt(
+    segments: list[tuple[float, float, str]],
+    *,
+    max_chars: int = 36,
+) -> str:
+    """Build SRT from explicit (start_sec, end_sec, text) segments (e.g. AI narration lines)."""
+    blocks: list[str] = []
+    idx = 1
+    for t0, t1, raw in segments:
+        txt = strip_overlay_quotes(str(raw).strip())
+        if not txt or txt == "-":
+            continue
+        end = max(t0 + 0.08, t1)
+        wrapped = _wrap_line(txt, max_chars)
+        body = "\n".join(wrapped) if wrapped else txt
+        blocks.append(f"{idx}\n{_format_ts(t0)} --> {_format_ts(end)}\n{body}\n")
+        idx += 1
+    return "\n".join(blocks)

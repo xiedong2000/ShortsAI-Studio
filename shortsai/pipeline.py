@@ -26,6 +26,17 @@ from shortsai.hook_clip import (
     hook_selection_to_meta,
     select_hook_window,
 )
+from shortsai.narration import (
+    NarrationCue,
+    build_timed_narration_track,
+    cues_to_meta_segments,
+    mix_video_audio_bed,
+    narration_cues_to_srt,
+    narration_to_meta,
+    narration_voice_from_env,
+    narration_volume_from_env,
+    resolve_scene_narration_cues,
+)
 from shortsai.srt_build import words_to_srt
 from shortsai.transcribe import TranscriptResult, WordSpan, transcribe
 
@@ -694,6 +705,8 @@ def process_upload(
     scene_overlay_times_override: list[tuple[float, float]] | None = None,
     ai_hook_cold_open: bool = False,
     ai_hook_meta: dict[str, Any] | None = None,
+    ai_narration: bool = False,
+    narration_volume: float | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """
     Full pipeline: validate duration → transcribe → SRT → 9:16 + burn-in subs → optional music
@@ -730,6 +743,9 @@ def process_upload(
     ``openai_api_key`` for vision; heuristic fallback without). Total length stays ≤ ``MAX_DURATION_SEC``
     (hook + trimmed main). Pass prior ``ai_hook`` metadata via ``ai_hook_meta`` to reuse the same window
     on re-export.
+
+    ``ai_narration``: generate a short English voiceover (GPT script + OpenAI TTS), duck original
+    speech, and mix optional background music under the narration. Requires ``openai_api_key``.
 
     Speech subtitles are unaffected.
     """
@@ -872,11 +888,38 @@ def process_upload(
 
     auto_srt = words_to_srt(tr.words)
     ov = (caption_srt_override or "").strip()
+
+    narration_cues: list[NarrationCue] | None = None
+    if (
+        ai_narration
+        and openai_api_key
+        and not (ov and _is_probable_srt(ov))
+    ):
+        try:
+            log("Planning scene narration (for voice + captions)…")
+            narration_cues, _narr_plan_src = resolve_scene_narration_cues(
+                transcript=tr.text,
+                words=tr.words,
+                duration_sec=dur,
+                api_key=openai_api_key,
+                video_path=local_in,
+                work_dir=work_dir,
+                visual_hint=visual_fallback or tr.text,
+                log=log,
+            )
+        except Exception as e:
+            log(f"Scene narration planning failed ({str(e)[:160]}); captions stay on speech.")
+            narration_cues = None
+
     burned_subtitle_source = "none"
     if ov and _is_probable_srt(ov):
         srt_text = ov
         burned_subtitle_source = "override"
         log("Using user-provided SRT for burned-in speech captions.")
+    elif narration_cues:
+        srt_text = narration_cues_to_srt(narration_cues)
+        burned_subtitle_source = "ai_narration"
+        log("Burned-in captions will show AI narration lines (timed per scene).")
     elif ov:
         log("Caption SRT override ignored (not valid SRT); using auto-generated cues from speech.")
         srt_text = auto_srt
@@ -891,6 +934,7 @@ def process_upload(
         and openai_api_key
         and thin_for_vision
         and not (ov and _is_probable_srt(ov))
+        and not narration_cues
     )
     if use_onscreen:
         log("Building burned-in captions from on-screen text (vision)…")
@@ -953,18 +997,6 @@ def process_upload(
         vertical_fit=resolved_vertical_fit,
     )
 
-    final_video = scaled
-    if music_path is not None and music_path.is_file():
-        log(f"Mixing music: {music_path.name} at volume {music_volume}")
-        music_local = work_dir / ("music" + music_path.suffix.lower())
-        shutil.copy2(music_path, music_local)
-        out_mix = work_dir / "final.mp4"
-        _mix_music(scaled, music_local, out_mix, music_volume=music_volume, cwd=work_dir)
-        final_video = out_mix
-        log("Music mixing complete")
-    else:
-        log("No music selected or music file not found")
-
     log("Generating metadata…")
     meta_hint = _srt_plain_for_metadata(srt_text) if srt_text.strip() else ""
     metadata_input = (meta_hint or tr.text).strip() or visual_fallback
@@ -981,9 +1013,93 @@ def process_upload(
     meta["burned_subtitle_source"] = burned_subtitle_source
     meta["visual_description"] = visual_fallback
     meta["language"] = tr.language
-    meta["duration_seconds"] = round(dur, 2)
     meta["ai_hook"] = ai_hook_block
     meta["vertical_fit"] = resolved_vertical_fit
+
+    narration_block: dict[str, Any] = narration_to_meta(applied=False)
+    narration_path: Path | None = None
+    if ai_narration:
+        if not openai_api_key:
+            log("AI narration skipped: set OPENAI_API_KEY in .env.")
+            narration_block = narration_to_meta(
+                applied=False, error="OPENAI_API_KEY not set"
+            )
+        elif not narration_cues:
+            log("AI narration skipped: no scene lines were planned.")
+            narration_block = narration_to_meta(
+                applied=False, error="scene narration planning failed"
+            )
+        else:
+            try:
+                scaled_dur = ffmpeg_util.probe_duration_seconds(scaled)
+                voice = narration_voice_from_env()
+                cues = narration_cues
+                narr_mp3 = work_dir / "narration_timed.mp3"
+                build_timed_narration_track(
+                    cues,
+                    narr_mp3,
+                    video_duration=scaled_dur,
+                    work_dir=work_dir,
+                    api_key=openai_api_key,
+                    voice=voice,
+                    log=log,
+                )
+                narration_path = narr_mp3
+                script_display = " | ".join(c.text for c in cues)
+                narr_vol_meta = (
+                    narration_volume
+                    if narration_volume is not None
+                    else narration_volume_from_env()
+                )
+                narration_block = narration_to_meta(
+                    applied=True,
+                    script=script_display,
+                    voice=voice,
+                    source="scene_timed",
+                    segment_lines=cues_to_meta_segments(cues),
+                    volume=narr_vol_meta,
+                )
+            except Exception as e:
+                log(f"AI narration failed ({str(e)[:200]}); export without voiceover.")
+                narration_block = narration_to_meta(applied=False, error=str(e))
+
+    meta["ai_narration"] = narration_block
+
+    music_local: Path | None = None
+    if music_path is not None and music_path.is_file():
+        music_local = work_dir / ("music" + music_path.suffix.lower())
+        shutil.copy2(music_path, music_local)
+
+    final_video = scaled
+    if narration_path is not None or music_local is not None:
+        narr_vol = (
+            narration_volume
+            if narration_volume is not None
+            else narration_volume_from_env()
+        )
+        if narration_path:
+            log(
+                f"Mixing AI narration (original speech ducked, narration gain {narr_vol:.2f})…"
+            )
+        if music_local:
+            log(f"Mixing music: {music_local.name} at volume {music_volume}")
+        out_mix = work_dir / "final.mp4"
+        mix_video_audio_bed(
+            scaled,
+            out_mix,
+            cwd=work_dir,
+            narration=narration_path,
+            music=music_local,
+            music_volume=music_volume,
+            original_volume=1.0,
+            narration_volume=narr_vol,
+            narration_timed=bool(narration_path),
+        )
+        final_video = out_mix
+        log("Audio mix complete")
+
+    dur = ffmpeg_util.probe_duration_seconds(final_video)
+    meta["duration_seconds"] = round(dur, 2)
 
     # On-screen lines: always scene-based (vision or text). Title/description/tags stay in metadata.json only.
     overlay_texts: list[str] = []
