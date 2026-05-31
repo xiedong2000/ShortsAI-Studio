@@ -562,3 +562,39 @@ def cues_to_meta_segments(cues: list[NarrationCue]) -> list[dict[str, Any]]:
         }
         for c in cues
     ]
+
+
+def narration_cues_from_meta(raw: Any) -> list[NarrationCue] | None:
+    """Rebuild timed narration cues saved in metadata ``ai_narration.segment_lines``."""
+    if not isinstance(raw, dict) or not raw.get("applied"):
+        return None
+    segments = raw.get("segment_lines")
+    if not isinstance(segments, list) or not segments:
+        return None
+    cues: list[NarrationCue] = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        try:
+            text = str(seg.get("text") or "").strip()
+            if not text:
+                continue
+            cues.append(
+                NarrationCue(
+                    start_sec=float(seg["start"]),
+                    end_sec=float(seg["end"]),
+                    text=text,
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return cues if cues else None
+
+
+def narration_voice_from_meta(raw: Any) -> str:
+    if isinstance(raw, dict):
+        v = str(raw.get("voice") or "").strip().lower()
+        allowed = frozenset({"alloy", "echo", "fable", "onyx", "nova", "shimmer"})
+        if v in allowed:
+            return v
+    return narration_voice_from_env()

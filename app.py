@@ -23,6 +23,8 @@ from shortsai.pipeline import (
     metadata_to_json_bytes,
     overlay_times_from_meta,
     process_upload,
+    resolve_caption_font_size,
+    resolve_scene_overlay_font_size,
 )
 
 load_dotenv()
@@ -52,6 +54,8 @@ _SS_NARRATION_VOL = "narration_vol"
 _CURRENT_STEP = "current_step"
 _SS_OVERLAY_DEFAULT = "overlay_default_pos"
 _SS_OVERLAY_POSITIONS_CSV = "overlay_positions_csv"
+_SS_CAPTION_FONT = "caption_font_size_ui"
+_SS_SCENE_FONT = "scene_font_size_ui"
 
 WIZARD_STEP_LABELS = ["Upload", "Options", "Generate", "Results"]
 
@@ -299,6 +303,56 @@ def _init_session_defaults() -> None:
         )
     if _SS_OVERLAY_POSITIONS_CSV not in st.session_state:
         st.session_state[_SS_OVERLAY_POSITIONS_CSV] = ""
+    if _SS_CAPTION_FONT not in st.session_state:
+        st.session_state[_SS_CAPTION_FONT] = resolve_caption_font_size(None)
+    if _SS_SCENE_FONT not in st.session_state:
+        st.session_state[_SS_SCENE_FONT] = resolve_scene_overlay_font_size(None)
+
+
+def _sync_font_sizes_from_meta(meta: dict[str, Any]) -> None:
+    cap = meta.get("caption_font_size")
+    sc = meta.get("scene_overlay_font_size")
+    fpr = ("font_ui", cap, sc)
+    if st.session_state.get("_font_ui_fpr") == fpr:
+        return
+    st.session_state["_font_ui_fpr"] = fpr
+    if isinstance(cap, (int, float)):
+        st.session_state[_SS_CAPTION_FONT] = resolve_caption_font_size(int(cap))
+    if isinstance(sc, (int, float)):
+        st.session_state[_SS_SCENE_FONT] = resolve_scene_overlay_font_size(int(sc))
+
+
+def _export_font_size_kwargs() -> dict[str, int]:
+    return {
+        "caption_font_size": int(st.session_state[_SS_CAPTION_FONT]),
+        "scene_overlay_font_size": int(st.session_state[_SS_SCENE_FONT]),
+    }
+
+
+def _sync_narration_from_meta(meta: dict[str, Any]) -> None:
+    narr = meta.get("ai_narration")
+    if not isinstance(narr, dict) or not narr.get("applied"):
+        return
+    st.session_state[_SS_AI_NARRATION] = True
+    vol = narr.get("volume")
+    if isinstance(vol, (int, float)):
+        st.session_state[_SS_NARRATION_VOL] = float(vol)
+
+
+def _narration_reexport_kwargs(meta: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep AI narration on re-export when Step 2 checkbox is off but prior export had it."""
+    use = bool(st.session_state.get(_SS_AI_NARRATION))
+    narr_meta: dict[str, Any] | None = None
+    if meta is not None:
+        raw = meta.get("ai_narration")
+        if isinstance(raw, dict) and raw.get("applied"):
+            use = True
+            narr_meta = raw
+    return {
+        "ai_narration": use,
+        "ai_narration_meta": narr_meta,
+        "narration_volume": float(st.session_state[_SS_NARRATION_VOL]),
+    }
 
 
 def _default_vertical_fit_from_env() -> str:
@@ -694,8 +748,8 @@ def main() -> None:
             help="Runs a second API step (text-only) so captions are English—vision alone often copies Chinese from the video.",
         )
         st.caption(
-            "Red AI scene line size: set SHORTSAI_SCENE_OVERLAY_FONT_SIZE in .env (default 64; about 36–100). "
-            "Speech subtitle size is separate: SHORTSAI_CAPTION_FONT_SIZE (default 14)."
+            "Speech caption and red scene text sizes: adjust in **Step 4** after export, or set "
+            "SHORTSAI_CAPTION_FONT_SIZE / SHORTSAI_SCENE_OVERLAY_FONT_SIZE in .env before generating."
         )
         _step_footer(2)
 
@@ -776,6 +830,7 @@ def main() -> None:
                         ai_hook_cold_open=bool(st.session_state.get(_SS_AI_HOOK)),
                         ai_narration=bool(st.session_state.get(_SS_AI_NARRATION)),
                         narration_volume=float(st.session_state[_SS_NARRATION_VOL]),
+                        **_export_font_size_kwargs(),
                     )
                     if music_choice is not None:
                         meta["music_file"] = music_choice.name
@@ -820,6 +875,8 @@ def main() -> None:
             st.info("Nothing here yet — use **Step 3 · Generate Short** above. After a successful run, results appear here.")
         else:
             _sync_whisper_cache_from_meta(meta)
+            _sync_font_sizes_from_meta(meta)
+            _sync_narration_from_meta(meta)
             ov_lines_result = list(meta.get("on_screen_overlay_lines") or [])
             clip_dur = float(meta.get("duration_seconds") or MAX_DURATION_SEC)
             fpr_ov = (
@@ -950,6 +1007,124 @@ def main() -> None:
                     mime="text/plain",
                 )
 
+            with st.expander("Adjust caption & scene text sizes", expanded=False):
+                st.caption(
+                    "Change burned-in **speech caption** size and **red scene line** size, then re-export. "
+                    "Whisper is skipped when the word cache is present."
+                )
+                st.slider(
+                    "Speech caption size",
+                    min_value=10,
+                    max_value=44,
+                    key=_SS_CAPTION_FONT,
+                    help="Burned-in SRT subtitle font (ASS FontSize). Default 10.",
+                )
+                st.slider(
+                    "Red scene text size",
+                    min_value=36,
+                    max_value=100,
+                    key=_SS_SCENE_FONT,
+                    help="Timed on-screen scene lines (drawtext). Default 64.",
+                )
+                if st.button("Re-export MP4 with new text sizes", key="btn_reexport_font_sizes"):
+                    ub_fs = st.session_state.get(_SS_UPLOAD_BYTES)
+                    if not ub_fs:
+                        st.error(
+                            "Upload missing — select your video again in **Step 1**, or run "
+                            "**Generate Short** in Step 3."
+                        )
+                    else:
+                        music_fs: Path | None = None
+                        pick_fs = st.session_state.get(_SS_MUSIC_PICK, "None")
+                        if pick_fs and pick_fs != "None" and music_files:
+                            for p in music_files:
+                                if p.name == pick_fs:
+                                    music_fs = p
+                                    break
+                        work_fs = Path(tempfile.mkdtemp(prefix="shortsai_re_font_"))
+                        try:
+                            src_fs = work_fs / f"upload{Path(upload_name).suffix or '.mp4'}"
+                            src_fs.write_bytes(ub_fs)
+                            model = _whisper_model()
+                            lines_fs: list[str] | None = None
+                            pos_fs: list[OverlayPosition] | None = None
+                            times_fs: list[tuple[float, float]] | None = None
+                            if ov_lines_result:
+                                ed_fs = _read_scene_editors(len(ov_lines_result), clip_dur)
+                                if ed_fs:
+                                    lines_fs, pos_fs, times_fs = ed_fs
+                                else:
+                                    lines_fs = [
+                                        strip_overlay_quotes(str(x))
+                                        for x in ov_lines_result
+                                        if strip_overlay_quotes(str(x))
+                                    ]
+                                    pos_fs = _scene_positions_for_reexport(meta, ov_lines_result)
+                                    times_fs = overlay_times_from_meta(
+                                        meta.get("on_screen_overlay_times"),
+                                        count=len(lines_fs or []),
+                                        duration_sec=clip_dur,
+                                    )
+                            if times_fs and any(t1 <= t0 for t0, t1 in times_fs):
+                                st.error("Each scene line needs **End (s)** greater than **Start (s)**.")
+                            else:
+                                srt_keep_fs = (meta.get("speech_srt") or "").strip()
+                                with st.spinner("Re-exporting with new text sizes…"):
+                                    mp4_fs, meta_fs = process_upload(
+                                        src_fs,
+                                        work_dir=work_fs,
+                                        whisper=model,
+                                        whisper_model=os.environ.get(
+                                            "SHORTSAI_WHISPER_MODEL", "base"
+                                        ),
+                                        openai_api_key=api_key.strip() or None,
+                                        music_path=music_fs,
+                                        music_volume=float(st.session_state[_SS_MUSIC_VOL]),
+                                        manual_overlay_text=None,
+                                        progress=None,
+                                        whisper_task=st.session_state[_SS_WHISPER_TASK],
+                                        whisper_language_hint=(
+                                            st.session_state.get(_SS_SPEECH_HINT) or ""
+                                        ).strip()
+                                        or None,
+                                        vertical_fit=cast(
+                                            VerticalFitMode, st.session_state[_SS_VERTICAL_FIT]
+                                        ),
+                                        caption_srt_override=srt_keep_fs if srt_keep_fs else None,
+                                        reuse_whisper_cache=_reuse_whisper_cache_arg(meta),
+                                        vision_onscreen_subtitles=bool(
+                                            st.session_state.get(_SS_VISION_ONSCREEN_SUBS)
+                                        ),
+                                        vision_onscreen_subtitles_english=bool(
+                                            st.session_state.get(_SS_VISION_ONSCREEN_EN)
+                                        ),
+                                        overlay_position=cast(
+                                            OverlayPosition, st.session_state[_SS_OVERLAY_DEFAULT]
+                                        ),
+                                        overlay_positions=pos_fs,
+                                        scene_overlay_lines_override=lines_fs,
+                                        scene_overlay_times_override=times_fs,
+                                        ai_hook_cold_open=bool(st.session_state.get(_SS_AI_HOOK)),
+                                        ai_hook_meta=meta.get("ai_hook")
+                                        if isinstance(meta.get("ai_hook"), dict)
+                                        else None,
+                                        **_narration_reexport_kwargs(meta),
+                                        **_export_font_size_kwargs(),
+                                    )
+                                if music_fs is not None:
+                                    meta_fs["music_file"] = music_fs.name
+                                else:
+                                    meta_fs["music_file"] = None
+                                st.session_state[_SS_WHISPER_CACHE] = meta_fs.get("whisper_cache")
+                                st.session_state[_SS_MP4] = mp4_fs
+                                st.session_state[_SS_META] = meta_fs
+                                st.success("Re-export complete.")
+                                st.rerun()
+                        except Exception as e:
+                            st.exception(e)
+                        finally:
+                            shutil.rmtree(work_fs, ignore_errors=True)
+
             with st.expander("Edit speech captions (SRT) & re-export", expanded=False):
                 st.caption(
                     "Fix typos in cue text only; keep cue numbers and `00:00:00,000 --> 00:00:00,000` lines intact. "
@@ -1043,10 +1218,8 @@ def main() -> None:
                                         ai_hook_meta=meta.get("ai_hook")
                                         if isinstance(meta.get("ai_hook"), dict)
                                         else None,
-                                        ai_narration=bool(st.session_state.get(_SS_AI_NARRATION)),
-                                        narration_volume=float(
-                                            st.session_state[_SS_NARRATION_VOL]
-                                        ),
+                                        **_narration_reexport_kwargs(meta),
+                                        **_export_font_size_kwargs(),
                                     )
                                 if music_re is not None:
                                     meta2["music_file"] = music_re.name
@@ -1193,12 +1366,8 @@ def main() -> None:
                                                 ai_hook_meta=meta.get("ai_hook")
                                                 if isinstance(meta.get("ai_hook"), dict)
                                                 else None,
-                                                ai_narration=bool(
-                                                    st.session_state.get(_SS_AI_NARRATION)
-                                                ),
-                                                narration_volume=float(
-                                                    st.session_state[_SS_NARRATION_VOL]
-                                                ),
+                                                **_narration_reexport_kwargs(meta),
+                                                **_export_font_size_kwargs(),
                                             )
                                         if music_re2 is not None:
                                             meta3["music_file"] = music_re2.name

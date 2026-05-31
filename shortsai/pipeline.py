@@ -32,8 +32,10 @@ from shortsai.narration import (
     cues_to_meta_segments,
     mix_video_audio_bed,
     narration_cues_to_srt,
+    narration_cues_from_meta,
     narration_to_meta,
     narration_voice_from_env,
+    narration_voice_from_meta,
     narration_volume_from_env,
     resolve_scene_narration_cues,
 )
@@ -182,8 +184,18 @@ def _scene_overlay_font_size_from_env() -> int:
     return max(36, min(100, n))
 
 
-def _scene_overlay_drawtext_style() -> str:
-    fs = _scene_overlay_font_size_from_env()
+def resolve_scene_overlay_font_size(override: int | None = None) -> int:
+    """Scene line drawtext size; ``override`` wins, else env (default 64, clamped 36–100)."""
+    if override is not None:
+        try:
+            return max(36, min(100, int(override)))
+        except (TypeError, ValueError):
+            pass
+    return _scene_overlay_font_size_from_env()
+
+
+def _scene_overlay_drawtext_style(font_size: int | None = None) -> str:
+    fs = resolve_scene_overlay_font_size(font_size)
     bw = max(2, min(4, fs // 18))
     sh = max(3, min(6, fs // 12))
     return (
@@ -351,8 +363,8 @@ def _coerce_vertical_fit(raw: str | None) -> VerticalFitMode:
 
 
 def _caption_font_size_from_env() -> int:
-    """ASS FontSize for burned-in speech subtitles only (SHORTSAI_CAPTION_FONT_SIZE, default 14)."""
-    raw = (os.environ.get("SHORTSAI_CAPTION_FONT_SIZE") or "14").strip()
+    """ASS FontSize for burned-in speech subtitles only (SHORTSAI_CAPTION_FONT_SIZE, default 10)."""
+    raw = (os.environ.get("SHORTSAI_CAPTION_FONT_SIZE") or "10").strip()
     try:
         n = int(raw)
     except ValueError:
@@ -360,9 +372,19 @@ def _caption_font_size_from_env() -> int:
     return max(10, min(44, n))
 
 
-def _speech_subtitles_vf(srt_basename: str) -> str:
-    """SRT burn-in with UTF-8 and configurable font size (SHORTSAI_CAPTION_FONT_SIZE, default 14)."""
-    fs = _caption_font_size_from_env()
+def resolve_caption_font_size(override: int | None = None) -> int:
+    """Speech caption ASS FontSize; ``override`` wins, else env (default 10, clamped 10–44)."""
+    if override is not None:
+        try:
+            return max(10, min(44, int(override)))
+        except (TypeError, ValueError):
+            pass
+    return _caption_font_size_from_env()
+
+
+def _speech_subtitles_vf(srt_basename: str, *, font_size: int | None = None) -> str:
+    """SRT burn-in with UTF-8 and configurable font size (SHORTSAI_CAPTION_FONT_SIZE, default 10)."""
+    fs = resolve_caption_font_size(font_size)
     style = f"FontSize={fs}\\,Outline=2\\,Shadow=0.5"
     return f"subtitles={srt_basename}:charenc=UTF-8:force_style={style}"
 
@@ -442,6 +464,7 @@ def _scale_and_subs(
     cwd: Path,
     srt_name: str | None,
     vertical_fit: VerticalFitMode = "crop",
+    caption_font_size: int | None = None,
 ) -> None:
     w, h = SHORT_WIDTH, SHORT_HEIGHT
     use_subs = False
@@ -449,7 +472,9 @@ def _scale_and_subs(
         srt_path = cwd / srt_name
         use_subs = srt_path.exists() and srt_path.stat().st_size > 0
 
-    sub_clause = f",{_speech_subtitles_vf(srt_name)}" if use_subs else ""
+    sub_clause = (
+        f",{_speech_subtitles_vf(srt_name, font_size=caption_font_size)}" if use_subs else ""
+    )
 
     if vertical_fit == "letterbox":
         inner = (
@@ -479,7 +504,7 @@ def _scale_and_subs(
                 f"[vb_in]{bg}[bg];"
                 f"[fg_in]{fg}[fg];"
                 f"[bg][fg]overlay=0:0[vpre];"
-                f"[vpre]{_speech_subtitles_vf(srt_name)}[vout]"
+                f"[vpre]{_speech_subtitles_vf(srt_name, font_size=caption_font_size)}[vout]"
             )
         else:
             filter_complex = (
@@ -535,6 +560,7 @@ def _add_text_overlay(
     overlay_position: OverlayPosition = "middle",
     overlay_positions: list[OverlayPosition] | None = None,
     overlay_times: list[tuple[float, float]] | None = None,
+    scene_font_size: int | None = None,
 ) -> None:
     """Burn scene-based on-screen lines only (title/description/tags stay in metadata, not here).
 
@@ -571,8 +597,8 @@ def _add_text_overlay(
         text = text.replace("\n", " ")
         return text
 
-    fs_overlay = _scene_overlay_font_size_from_env()
-    style = _scene_overlay_drawtext_style()
+    fs_overlay = resolve_scene_overlay_font_size(scene_font_size)
+    style = _scene_overlay_drawtext_style(fs_overlay)
     overlay_filters: list[str] = []
     n_lines = len(lines)
     for idx, text_content in enumerate(lines):
@@ -710,6 +736,9 @@ def process_upload(
     ai_hook_meta: dict[str, Any] | None = None,
     ai_narration: bool = False,
     narration_volume: float | None = None,
+    ai_narration_meta: dict[str, Any] | None = None,
+    caption_font_size: int | None = None,
+    scene_overlay_font_size: int | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """
     Full pipeline: validate duration → transcribe → SRT → 9:16 + burn-in subs → optional music
@@ -750,9 +779,18 @@ def process_upload(
     ``ai_narration``: generate a short English voiceover (GPT script + OpenAI TTS), duck original
     speech, and mix optional background music under the narration. Requires ``openai_api_key``.
 
-    Speech subtitles are unaffected.
+    ``ai_narration_meta``: prior export ``ai_narration`` block with ``segment_lines`` — reuses the
+    same script/timing on re-export (re-synthesizes TTS) instead of re-planning from vision/GPT.
+
+    ``caption_font_size`` / ``scene_overlay_font_size``: burned-in speech caption ASS size (10–44)
+    and red timed scene drawtext size (36–100). ``None`` uses env defaults.
+
+    Speech subtitles are unaffected by scene overlay size; scene lines are unaffected by caption size.
     """
     log = progress or (lambda _m: None)
+
+    resolved_caption_font_size = resolve_caption_font_size(caption_font_size)
+    resolved_scene_font_size = resolve_scene_overlay_font_size(scene_overlay_font_size)
 
     resolved_vertical_fit: VerticalFitMode = (
         vertical_fit if vertical_fit is not None else _coerce_vertical_fit(os.environ.get("SHORTSAI_VERTICAL_FIT"))
@@ -893,7 +931,11 @@ def process_upload(
     ov = (caption_srt_override or "").strip()
 
     narration_cues: list[NarrationCue] | None = None
-    if (
+    prior_narr = narration_cues_from_meta(ai_narration_meta) if ai_narration_meta else None
+    if ai_narration and prior_narr:
+        log(f"Reusing AI narration ({len(prior_narr)} lines) from prior export.")
+        narration_cues = prior_narr
+    elif (
         ai_narration
         and openai_api_key
         and not (ov and _is_probable_srt(ov))
@@ -998,6 +1040,7 @@ def process_upload(
         cwd=work_dir,
         srt_name=srt_name,
         vertical_fit=resolved_vertical_fit,
+        caption_font_size=resolved_caption_font_size,
     )
 
     log("Generating metadata…")
@@ -1018,6 +1061,8 @@ def process_upload(
     meta["language"] = tr.language
     meta["ai_hook"] = ai_hook_block
     meta["vertical_fit"] = resolved_vertical_fit
+    meta["caption_font_size"] = resolved_caption_font_size
+    meta["scene_overlay_font_size"] = resolved_scene_font_size
 
     narration_block: dict[str, Any] = narration_to_meta(applied=False)
     narration_path: Path | None = None
@@ -1035,7 +1080,7 @@ def process_upload(
         else:
             try:
                 scaled_dur = ffmpeg_util.probe_duration_seconds(scaled)
-                voice = narration_voice_from_env()
+                voice = narration_voice_from_meta(ai_narration_meta)
                 cues = narration_cues
                 narr_mp3 = work_dir / "narration_timed.mp3"
                 build_timed_narration_track(
@@ -1204,6 +1249,7 @@ def process_upload(
             overlay_position=resolved_overlay_position,
             overlay_positions=per_line_pos,
             overlay_times=per_line_times,
+            scene_font_size=resolved_scene_font_size,
         )
         final_video = overlay_video
         meta["scene_overlay_applied"] = True
