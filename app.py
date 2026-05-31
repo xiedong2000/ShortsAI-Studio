@@ -330,9 +330,16 @@ def _export_font_size_kwargs() -> dict[str, int]:
 
 
 def _sync_narration_from_meta(meta: dict[str, Any]) -> None:
+    """Sync Step 2 narration widgets from export metadata (call before Step 2 renders)."""
     narr = meta.get("ai_narration")
     if not isinstance(narr, dict) or not narr.get("applied"):
         return
+    segs = narr.get("segment_lines")
+    n_segs = len(segs) if isinstance(segs, list) else 0
+    fpr = ("narr_ui", n_segs, narr.get("script"), narr.get("volume"))
+    if st.session_state.get("_narr_ui_fpr") == fpr:
+        return
+    st.session_state["_narr_ui_fpr"] = fpr
     st.session_state[_SS_AI_NARRATION] = True
     vol = narr.get("volume")
     if isinstance(vol, (int, float)):
@@ -551,6 +558,10 @@ def main() -> None:
     )
 
     _init_session_defaults()
+
+    _meta_boot = st.session_state.get(_SS_META)
+    if isinstance(_meta_boot, dict):
+        _sync_narration_from_meta(_meta_boot)
 
     st.title("ShortsAI Studio")
     st.markdown(
@@ -876,7 +887,6 @@ def main() -> None:
         else:
             _sync_whisper_cache_from_meta(meta)
             _sync_font_sizes_from_meta(meta)
-            _sync_narration_from_meta(meta)
             ov_lines_result = list(meta.get("on_screen_overlay_lines") or [])
             clip_dur = float(meta.get("duration_seconds") or MAX_DURATION_SEC)
             fpr_ov = (
