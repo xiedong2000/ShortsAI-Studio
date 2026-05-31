@@ -45,7 +45,7 @@ from shortsai.transcribe import TranscriptResult, WordSpan, transcribe
 VerticalFitMode = Literal["letterbox", "crop", "blur_fill"]
 OverlayPosition = Literal["upper", "middle", "lower"]
 
-DEFAULT_MAX_DURATION_SEC = 60.0
+DEFAULT_MAX_DURATION_SEC = 120.0
 HARD_MAX_DURATION_SEC = 120.0  # upper cap (2 minutes)
 # Back-compat alias for imports expecting MAX_DURATION_SEC
 MAX_DURATION_SEC = DEFAULT_MAX_DURATION_SEC
@@ -56,7 +56,7 @@ SHORT_HEIGHT = 1920
 # Picked to stay clear of the YouTube Shorts UI: top app bar (~0–10%) and
 # bottom action rail / caption block (~80–100%).
 def max_duration_sec_from_env() -> float:
-    """Max input/output clip length (seconds). Default 60; set SHORTSAI_MAX_DURATION_SEC up to 120."""
+    """Max input/output clip length (seconds). Default 120; set SHORTSAI_MAX_DURATION_SEC up to 120."""
     raw = (os.environ.get("SHORTSAI_MAX_DURATION_SEC") or "").strip()
     if not raw:
         return DEFAULT_MAX_DURATION_SEC
@@ -386,15 +386,15 @@ def _caption_font_size_from_env() -> int:
     try:
         n = int(raw)
     except ValueError:
-        n = 14
-    return max(10, min(44, n))
+        n = 10
+    return max(1, min(20, n))
 
 
 def resolve_caption_font_size(override: int | None = None) -> int:
-    """Speech caption ASS FontSize; ``override`` wins, else env (default 10, clamped 10–44)."""
+    """Speech caption ASS FontSize; ``override`` wins, else env (default 10, clamped 1–20)."""
     if override is not None:
         try:
-            return max(10, min(44, int(override)))
+            return max(1, min(20, int(override)))
         except (TypeError, ValueError):
             pass
     return _caption_font_size_from_env()
@@ -791,7 +791,7 @@ def process_upload(
 
     ``ai_hook_cold_open``: prepend a short AI-picked clip from the source as a cold open (needs
     ``openai_api_key`` for vision; heuristic fallback without). Total length stays ≤ configured max
-    (``SHORTSAI_MAX_DURATION_SEC``, default 60s, max 120s).
+    (``SHORTSAI_MAX_DURATION_SEC``, default 120s, max 120s).
     (hook + trimmed main). Pass prior ``ai_hook`` metadata via ``ai_hook_meta`` to reuse the same window
     on re-export.
 
@@ -801,7 +801,7 @@ def process_upload(
     ``ai_narration_meta``: prior export ``ai_narration`` block with ``segment_lines`` — reuses the
     same script/timing on re-export (re-synthesizes TTS) instead of re-planning from vision/GPT.
 
-    ``caption_font_size`` / ``scene_overlay_font_size``: burned-in speech caption ASS size (10–44)
+    ``caption_font_size`` / ``scene_overlay_font_size``: burned-in speech caption ASS size (1–20)
     and red timed scene drawtext size (36–100). ``None`` uses env defaults.
 
     Speech subtitles are unaffected by scene overlay size; scene lines are unaffected by caption size.

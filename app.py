@@ -611,7 +611,7 @@ def main() -> None:
             type=["mp4", "mov", "webm", "mkv", "avi"],
             help=(
                 f"Maximum length {max_duration_sec_from_env():.0f}s "
-                f"(default 60; set SHORTSAI_MAX_DURATION_SEC up to {HARD_MAX_DURATION_SEC:.0f} in .env)."
+                f"(default 120; set SHORTSAI_MAX_DURATION_SEC up to {HARD_MAX_DURATION_SEC:.0f} in .env)."
             ),
             label_visibility="collapsed",
         )
@@ -1031,8 +1031,8 @@ def main() -> None:
                 )
                 st.slider(
                     "Speech caption size",
-                    min_value=10,
-                    max_value=44,
+                    min_value=1,
+                    max_value=20,
                     key=_SS_CAPTION_FONT,
                     help="Burned-in SRT subtitle font (ASS FontSize). Default 10.",
                 )

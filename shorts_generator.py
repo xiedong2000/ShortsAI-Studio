@@ -76,7 +76,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Input video path (mp4, mov, webm, etc.). Max length: env SHORTSAI_MAX_DURATION_SEC "
-            "(default 60s, max 120s). Required unless --list-music."
+            "(default 120s, max 120s). Required unless --list-music."
         ),
     )
     p.add_argument(
