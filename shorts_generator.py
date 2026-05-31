@@ -74,7 +74,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--input",
         type=Path,
         default=None,
-        help="Input video path (mp4, mov, webm, etc.; max 60s). Required unless --list-music.",
+        help=(
+            "Input video path (mp4, mov, webm, etc.). Max length: env SHORTSAI_MAX_DURATION_SEC "
+            "(default 60s, max 120s). Required unless --list-music."
+        ),
     )
     p.add_argument(
         "-o",
@@ -171,7 +174,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Prepend a ~5s AI-picked cold open from the source, then the clip from the start "
-            "(total ≤ 60s). Vision needs OPENAI_API_KEY; else uses a heuristic."
+            "(total ≤ max duration). Vision needs OPENAI_API_KEY; else uses a heuristic."
+        ),
+    )
+    p.add_argument(
+        "--max-duration",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help=(
+            "Override max clip length in seconds (10–120). Default: SHORTSAI_MAX_DURATION_SEC or 60."
         ),
     )
     p.add_argument(
@@ -243,13 +255,18 @@ def main(argv: list[str] | None = None) -> int:
 
     from shortsai import ffmpeg_util
     from shortsai.pipeline import (
-        MAX_DURATION_SEC,
+        clamp_max_duration_sec,
         coerce_overlay_position,
+        max_duration_sec_from_env,
         metadata_to_json_bytes,
         process_upload,
     )
 
     load_dotenv(ROOT / ".env")
+    if args.max_duration is not None:
+        os.environ["SHORTSAI_MAX_DURATION_SEC"] = str(
+            clamp_max_duration_sec(args.max_duration)
+        )
 
     inp = args.input.expanduser().resolve()
     if not inp.is_file():
@@ -299,10 +316,11 @@ def main(argv: list[str] | None = None) -> int:
         print(str(e), file=sys.stderr)
         return 2
 
+    max_dur = max_duration_sec_from_env()
     dur = ffmpeg_util.probe_duration_seconds(inp)
-    if dur > MAX_DURATION_SEC + 0.05:
+    if dur > max_dur + 0.05:
         print(
-            f"error: video is {dur:.1f}s; max allowed is {MAX_DURATION_SEC:.0f}s.",
+            f"error: video is {dur:.1f}s; max allowed is {max_dur:.0f}s.",
             file=sys.stderr,
         )
         return 1

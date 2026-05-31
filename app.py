@@ -15,8 +15,9 @@ from faster_whisper import WhisperModel
 from shortsai import ffmpeg_util
 from shortsai.metadata_llm import strip_overlay_quotes
 from shortsai.pipeline import (
-    MAX_DURATION_SEC,
+    HARD_MAX_DURATION_SEC,
     VerticalFitMode,
+    max_duration_sec_from_env,
     OverlayPosition,
     coerce_overlay_position,
     default_overlay_line_times,
@@ -603,12 +604,15 @@ def main() -> None:
         _step_header(
             1,
             "Upload",
-            f"Choose a file (max {MAX_DURATION_SEC:.0f}s). Your file is kept until you replace it.",
+            f"Choose a file (max {max_duration_sec_from_env():.0f}s). Your file is kept until you replace it.",
         )
         uploaded = st.file_uploader(
             "Video file",
             type=["mp4", "mov", "webm", "mkv", "avi"],
-            help=f"Maximum length {MAX_DURATION_SEC:.0f} seconds for this version.",
+            help=(
+                f"Maximum length {max_duration_sec_from_env():.0f}s "
+                f"(default 60; set SHORTSAI_MAX_DURATION_SEC up to {HARD_MAX_DURATION_SEC:.0f} in .env)."
+            ),
             label_visibility="collapsed",
         )
         if uploaded is not None:
@@ -715,7 +719,8 @@ def main() -> None:
             key=_SS_AI_HOOK,
             help=(
                 "Uses OpenAI vision to pick a short eye-catching segment from your upload and "
-                "plays it before the rest (total length still ≤ 60s). Needs OPENAI_API_KEY; "
+                f"plays it before the rest (total length still ≤ {max_duration_sec_from_env():.0f}s). "
+                "Needs OPENAI_API_KEY; "
                 "without a key, uses a simple mid-clip heuristic. Set SHORTSAI_AI_HOOK_SEC in .env "
                 "to change hook length (3–8s)."
             ),
@@ -804,11 +809,13 @@ def main() -> None:
                 has_audio = True
                 try:
                     dur = ffmpeg_util.probe_duration_seconds(src)
-                    if dur > MAX_DURATION_SEC + 0.05:
+                    max_dur = max_duration_sec_from_env()
+                    if dur > max_dur + 0.05:
                         status.update(label="Too long", state="error")
                         st.error(
-                            f"This clip is **{dur:.1f}s**. Maximum length is **{MAX_DURATION_SEC:.0f}s**. "
-                            "Trim the video and try again."
+                            f"This clip is **{dur:.1f}s**. Maximum length is **{max_dur:.0f}s** "
+                            f"(set `SHORTSAI_MAX_DURATION_SEC` up to **{HARD_MAX_DURATION_SEC:.0f}** in `.env` "
+                            "to allow longer clips, then restart the app). Trim the video or raise the limit."
                         )
                         shutil.rmtree(work, ignore_errors=True)
                         st.stop()
@@ -888,7 +895,7 @@ def main() -> None:
             _sync_whisper_cache_from_meta(meta)
             _sync_font_sizes_from_meta(meta)
             ov_lines_result = list(meta.get("on_screen_overlay_lines") or [])
-            clip_dur = float(meta.get("duration_seconds") or MAX_DURATION_SEC)
+            clip_dur = float(meta.get("duration_seconds") or max_duration_sec_from_env())
             fpr_ov = (
                 "ov_pos_ui",
                 tuple(ov_lines_result),

@@ -10,7 +10,7 @@
   <a href="https://github.com/xiedong2000/ShortsAI-Studio/pulls" title="Pull requests"><img src="https://img.shields.io/github/issues-pr/xiedong2000/ShortsAI-Studio?style=flat-square" alt="GitHub pull requests" /></a>
 </p>
 
-Turn a short clip (≤ **60s**) into a **1080×1920** YouTube Shorts–style MP4: **burned-in captions** (Whisper), optional **background music**, **GPT title/description/tags**, and **timed on-screen scene lines**. Use the **Streamlit** wizard or the **`shorts_generator.py`** CLI—the same pipeline powers both.
+Turn a short clip (≤ **60s** by default, up to **120s** via `SHORTSAI_MAX_DURATION_SEC`) into a **1080×1920** YouTube Shorts–style MP4: **burned-in captions** (Whisper), optional **background music**, **GPT title/description/tags**, and **timed on-screen scene lines**. Use the **Streamlit** wizard or the **`shorts_generator.py`** CLI—the same pipeline powers both.
 
 ---
 
@@ -112,7 +112,7 @@ Outputs **`<stem>_shorts.mp4`** and **`<stem>_shorts.json`** next to the input (
 
 `--vertical-fit` overrides **`SHORTSAI_VERTICAL_FIT`** for that run. **`--music first`** uses the first sorted file in `assets/music/`.
 
-**One-shot checklist:** `ffmpeg`/`ffprobe` OK → run CLI or Streamlit on a clip under 60s → confirm MP4 + captions (if speech) + optional music + JSON metadata.
+**One-shot checklist:** `ffmpeg`/`ffprobe` OK → run CLI or Streamlit on a clip within the max length (60s default, 120s max) → confirm MP4 + captions (if speech) + optional music + JSON metadata.
 
 ---
 

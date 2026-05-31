@@ -45,13 +45,31 @@ from shortsai.transcribe import TranscriptResult, WordSpan, transcribe
 VerticalFitMode = Literal["letterbox", "crop", "blur_fill"]
 OverlayPosition = Literal["upper", "middle", "lower"]
 
-MAX_DURATION_SEC = 60.0
+DEFAULT_MAX_DURATION_SEC = 60.0
+HARD_MAX_DURATION_SEC = 120.0  # upper cap (2 minutes)
+# Back-compat alias for imports expecting MAX_DURATION_SEC
+MAX_DURATION_SEC = DEFAULT_MAX_DURATION_SEC
 SHORT_WIDTH = 1080
 SHORT_HEIGHT = 1920
 
 # Vertical centers (fraction of frame height) for on-screen scene text.
 # Picked to stay clear of the YouTube Shorts UI: top app bar (~0–10%) and
 # bottom action rail / caption block (~80–100%).
+def max_duration_sec_from_env() -> float:
+    """Max input/output clip length (seconds). Default 60; set SHORTSAI_MAX_DURATION_SEC up to 120."""
+    raw = (os.environ.get("SHORTSAI_MAX_DURATION_SEC") or "").strip()
+    if not raw:
+        return DEFAULT_MAX_DURATION_SEC
+    try:
+        return max(10.0, min(HARD_MAX_DURATION_SEC, float(raw)))
+    except ValueError:
+        return DEFAULT_MAX_DURATION_SEC
+
+
+def clamp_max_duration_sec(sec: float) -> float:
+    return max(10.0, min(HARD_MAX_DURATION_SEC, float(sec)))
+
+
 _OVERLAY_Y_FRACTIONS: dict[str, float] = {
     "upper": 0.25,
     "middle": 0.50,
@@ -772,7 +790,8 @@ def process_upload(
     override lines (or auto-generated lines). Clamped to video duration.
 
     ``ai_hook_cold_open``: prepend a short AI-picked clip from the source as a cold open (needs
-    ``openai_api_key`` for vision; heuristic fallback without). Total length stays ≤ ``MAX_DURATION_SEC``
+    ``openai_api_key`` for vision; heuristic fallback without). Total length stays ≤ configured max
+    (``SHORTSAI_MAX_DURATION_SEC``, default 60s, max 120s).
     (hook + trimmed main). Pass prior ``ai_hook`` metadata via ``ai_hook_meta`` to reuse the same window
     on re-export.
 
@@ -802,9 +821,13 @@ def process_upload(
     )
 
     ffmpeg_util.require_ffmpeg()
+    max_dur = max_duration_sec_from_env()
     dur = ffmpeg_util.probe_duration_seconds(input_video)
-    if dur > MAX_DURATION_SEC + 0.05:
-        raise ValueError(f"Video is {dur:.1f}s; max allowed is {MAX_DURATION_SEC:.0f}s for this version.")
+    if dur > max_dur + 0.05:
+        raise ValueError(
+            f"Video is {dur:.1f}s; max allowed is {max_dur:.0f}s "
+            f"(set SHORTSAI_MAX_DURATION_SEC up to {HARD_MAX_DURATION_SEC:.0f})."
+        )
 
     work_dir.mkdir(parents=True, exist_ok=True)
     stem = "src" + input_video.suffix.lower()
@@ -839,7 +862,7 @@ def process_upload(
                     hooked_path,
                     hook=hook_sel,
                     hook_len=hook_len,
-                    max_output_sec=MAX_DURATION_SEC,
+                    max_output_sec=max_dur,
                     cwd=work_dir,
                 )
                 local_in = hooked_path
