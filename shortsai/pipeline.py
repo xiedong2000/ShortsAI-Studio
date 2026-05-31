@@ -556,11 +556,14 @@ def _add_text_overlay(
     font_clause = _prepare_overlay_font_in_cwd(cwd)
 
     def escape_drawtext_line(s: str) -> str:
-        """Escape user/AI text for drawtext=text=\"...\" inside -filter_complex (no newlines)."""
-        text = s.replace("\\", "\\\\")
+        """Escape for drawtext=text=... in -filter_complex; never emit quote glyphs."""
+        text = strip_overlay_quotes((s or "").strip())
+        text = text.replace("\\", "\\\\")
         text = text.replace(",", "\\,")
+        text = text.replace(";", "\\;")
         text = text.replace("'", "`")
-        text = text.replace('"', '\\"')
+        # Do not use \" here. Some FFmpeg builds render escaped wrapper quotes literally.
+        text = text.replace('"', "")
         text = text.replace("%", "%%")
         text = text.replace(":", "\\:")
         text = text.replace("[", "\\[")
@@ -591,17 +594,17 @@ def _add_text_overlay(
             esc_a = escape_drawtext_line(parts[0][:500])
             esc_b = escape_drawtext_line(parts[1][:500])
             overlay_filters.append(
-                f'drawtext=text="{esc_a}"{font_clause}:{style}:'
+                f"drawtext=text={esc_a}{font_clause}:{style}:"
                 f"x=(w-text_w)/2:y={base_y}-{row_gap}:{enable}"
             )
             overlay_filters.append(
-                f'drawtext=text="{esc_b}"{font_clause}:{style}:'
+                f"drawtext=text={esc_b}{font_clause}:{style}:"
                 f"x=(w-text_w)/2:y={base_y}+{max(row_gap // 2, 6)}:{enable}"
             )
         else:
             esc = escape_drawtext_line(parts[0][:900])
             overlay_filters.append(
-                f'drawtext=text="{esc}"{font_clause}:{style}:'
+                f"drawtext=text={esc}{font_clause}:{style}:"
                 f"x=(w-text_w)/2:y={base_y}:{enable}"
             )
 
