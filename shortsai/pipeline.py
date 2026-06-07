@@ -752,6 +752,7 @@ def process_upload(
     ai_narration_meta: dict[str, Any] | None = None,
     caption_font_size: int | None = None,
     scene_overlay_font_size: int | None = None,
+    burn_subtitles: bool = True,
 ) -> tuple[bytes, dict[str, Any]]:
     """
     Full pipeline: validate duration → transcribe → SRT → 9:16 + burn-in subs → optional music
@@ -798,6 +799,9 @@ def process_upload(
 
     ``caption_font_size`` / ``scene_overlay_font_size``: burned-in speech caption ASS size (1–20)
     and red timed scene drawtext size (36–100). ``None`` uses env defaults.
+
+    ``burn_subtitles``: when False, still transcribe and save SRT in metadata but skip burning
+    speech/narration captions into the video (red scene overlays are unchanged).
 
     Speech subtitles are unaffected by scene overlay size; scene lines are unaffected by caption size.
     """
@@ -1046,17 +1050,20 @@ def process_upload(
     else:
         log("No SRT content generated (no words detected)")
 
+    srt_burn_name = srt_name if burn_subtitles else None
+    if srt_name and not burn_subtitles:
+        log("Skipping burned-in speech captions (disabled); SRT still saved in metadata.")
     log(
         "Rendering vertical 9:16 video"
         + (f" ({resolved_vertical_fit})" if resolved_vertical_fit != "crop" else "")
-        + (" with captions…" if srt_name else "…")
+        + (" with captions…" if srt_burn_name else "…")
     )
     scaled = work_dir / "scaled_subs.mp4"
     _scale_and_subs(
         local_in,
         scaled,
         cwd=work_dir,
-        srt_name=srt_name,
+        srt_name=srt_burn_name,
         vertical_fit=resolved_vertical_fit,
         caption_font_size=resolved_caption_font_size,
     )
@@ -1074,7 +1081,10 @@ def process_upload(
         work_dir=work_dir,
     )
     meta["transcript"] = tr.text
-    meta["burned_subtitle_source"] = burned_subtitle_source
+    meta["subtitles_burned"] = bool(burn_subtitles and srt_name)
+    meta["burned_subtitle_source"] = burned_subtitle_source if burn_subtitles else "none"
+    if not burn_subtitles and burned_subtitle_source != "none":
+        meta["subtitle_srt_source"] = burned_subtitle_source
     meta["visual_description"] = visual_fallback
     meta["language"] = tr.language
     meta["ai_hook"] = ai_hook_block

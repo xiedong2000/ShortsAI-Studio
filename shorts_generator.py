@@ -130,6 +130,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional ISO 639-1 speech hint (e.g. zh, ja). Empty = auto-detect.",
     )
     p.add_argument(
+        "--no-burn-subtitles",
+        action="store_true",
+        help=(
+            "Transcribe and save SRT in metadata but do not burn speech/narration captions "
+            "into the MP4."
+        ),
+    )
+    p.add_argument(
         "--manual-overlay",
         default="",
         help="Optional single line of on-screen text (replaces AI scene lines).",
@@ -357,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
             ai_hook_cold_open=bool(args.ai_hook),
             ai_narration=bool(args.ai_narration),
             narration_volume=args.narration_volume,
+            burn_subtitles=not bool(args.no_burn_subtitles),
         )
         if music_path is not None:
             meta["music_file"] = music_path.name

@@ -57,6 +57,7 @@ _SS_OVERLAY_DEFAULT = "overlay_default_pos"
 _SS_OVERLAY_POSITIONS_CSV = "overlay_positions_csv"
 _SS_CAPTION_FONT = "caption_font_size_ui"
 _SS_SCENE_FONT = "scene_font_size_ui"
+_SS_BURN_SUBTITLES = "burn_subtitles_ui"
 
 WIZARD_STEP_LABELS = ["Upload", "Options", "Generate", "Results"]
 
@@ -308,6 +309,8 @@ def _init_session_defaults() -> None:
         st.session_state[_SS_CAPTION_FONT] = resolve_caption_font_size(None)
     if _SS_SCENE_FONT not in st.session_state:
         st.session_state[_SS_SCENE_FONT] = resolve_scene_overlay_font_size(None)
+    if _SS_BURN_SUBTITLES not in st.session_state:
+        st.session_state[_SS_BURN_SUBTITLES] = True
 
 
 def _sync_font_sizes_from_meta(meta: dict[str, Any]) -> None:
@@ -328,6 +331,24 @@ def _export_font_size_kwargs() -> dict[str, int]:
         "caption_font_size": int(st.session_state[_SS_CAPTION_FONT]),
         "scene_overlay_font_size": int(st.session_state[_SS_SCENE_FONT]),
     }
+
+
+def _export_burn_subtitles_kwargs(*, force_burn: bool = False) -> dict[str, bool]:
+    return {
+        "burn_subtitles": True if force_burn else bool(st.session_state.get(_SS_BURN_SUBTITLES, True)),
+    }
+
+
+def _sync_burn_subtitles_from_meta(meta: dict[str, Any]) -> None:
+    """Sync Step 2 checkbox from export metadata (call only before Step 2 renders)."""
+    if "subtitles_burned" not in meta:
+        return
+    burned = bool(meta.get("subtitles_burned"))
+    fpr = ("burn_subs_ui", burned)
+    if st.session_state.get("_burn_subs_ui_fpr") == fpr:
+        return
+    st.session_state["_burn_subs_ui_fpr"] = fpr
+    st.session_state[_SS_BURN_SUBTITLES] = burned
 
 
 def _sync_narration_from_meta(meta: dict[str, Any]) -> None:
@@ -563,6 +584,7 @@ def main() -> None:
     _meta_boot = st.session_state.get(_SS_META)
     if isinstance(_meta_boot, dict):
         _sync_narration_from_meta(_meta_boot)
+        _sync_burn_subtitles_from_meta(_meta_boot)
 
     st.title("ShortsAI Studio")
     st.markdown(
@@ -694,6 +716,16 @@ def main() -> None:
             placeholder="e.g. upper, middle, lower",
             help="Same order as timed scene lines after export (often 1–4). Words: upper, middle, lower. "
             "Shorter lists pad with the default band above; extra entries are ignored.",
+        )
+
+        st.checkbox(
+            "Burn speech captions into the video",
+            key=_SS_BURN_SUBTITLES,
+            help=(
+                "When off, Whisper still runs and captions.srt is saved in metadata, but no "
+                "subtitles are burned into the MP4 (including AI narration caption lines). "
+                "Red timed scene text overlays are separate."
+            ),
         )
 
         _sub_default = 1 if st.session_state[_SS_WHISPER_TASK] == "translate" else 0
@@ -849,6 +881,7 @@ def main() -> None:
                         ai_narration=bool(st.session_state.get(_SS_AI_NARRATION)),
                         narration_volume=float(st.session_state[_SS_NARRATION_VOL]),
                         **_export_font_size_kwargs(),
+                        **_export_burn_subtitles_kwargs(),
                     )
                     if music_choice is not None:
                         meta["music_file"] = music_choice.name
@@ -1127,6 +1160,7 @@ def main() -> None:
                                         else None,
                                         **_narration_reexport_kwargs(meta),
                                         **_export_font_size_kwargs(),
+                                        **_export_burn_subtitles_kwargs(),
                                     )
                                 if music_fs is not None:
                                     meta_fs["music_file"] = music_fs.name
@@ -1237,6 +1271,7 @@ def main() -> None:
                                         else None,
                                         **_narration_reexport_kwargs(meta),
                                         **_export_font_size_kwargs(),
+                                        **_export_burn_subtitles_kwargs(force_burn=True),
                                     )
                                 if music_re is not None:
                                     meta2["music_file"] = music_re.name
@@ -1385,6 +1420,7 @@ def main() -> None:
                                                 else None,
                                                 **_narration_reexport_kwargs(meta),
                                                 **_export_font_size_kwargs(),
+                                                **_export_burn_subtitles_kwargs(),
                                             )
                                         if music_re2 is not None:
                                             meta3["music_file"] = music_re2.name
@@ -1409,14 +1445,20 @@ def main() -> None:
             src = meta.get("metadata_source")
             if isinstance(src, str) and src:
                 st.caption(f"Metadata source: `{src}`")
-            bsrc = meta.get("burned_subtitle_source")
-            if isinstance(bsrc, str) and bsrc:
-                label = (
-                    "Burned-in captions (AI narration text)"
-                    if bsrc == "ai_narration"
-                    else f"Burned-in caption source: `{bsrc}`"
+            if meta.get("subtitles_burned") is False:
+                src = meta.get("subtitle_srt_source") or "none"
+                st.caption(
+                    f"Speech captions **not** burned in (SRT prepared from `{src}`; download below)."
                 )
-                st.caption(label)
+            else:
+                bsrc = meta.get("burned_subtitle_source")
+                if isinstance(bsrc, str) and bsrc and bsrc != "none":
+                    label = (
+                        "Burned-in captions (AI narration text)"
+                        if bsrc == "ai_narration"
+                        else f"Burned-in caption source: `{bsrc}`"
+                    )
+                    st.caption(label)
 
             st.markdown("##### Title")
             title = meta.get("title") or ""
