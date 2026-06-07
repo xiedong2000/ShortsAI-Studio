@@ -599,21 +599,16 @@ def _add_text_overlay(
     pts0 = ffmpeg_util.probe_video_start_time_seconds(video_in)
     font_clause = _prepare_overlay_font_in_cwd(cwd)
 
-    def escape_drawtext_line(s: str) -> str:
-        """Escape for drawtext=text=... in -filter_complex; never emit quote glyphs."""
-        text = strip_overlay_quotes((s or "").strip())
-        text = text.replace("\\", "\\\\")
-        text = text.replace(",", "\\,")
-        text = text.replace(";", "\\;")
-        text = text.replace("'", "`")
-        # Do not use \" here. Some FFmpeg builds render escaped wrapper quotes literally.
-        text = text.replace('"', "")
-        text = text.replace("%", "%%")
-        text = text.replace(":", "\\:")
-        text = text.replace("[", "\\[")
-        text = text.replace("]", "\\]")
-        text = text.replace("\n", " ")
-        return text
+    def write_drawtext_textfile(line_idx: int, row_idx: int, raw: str, *, max_len: int) -> str:
+        """Write overlay string to a cwd-local file; avoids filter parse breaks on : , ' etc."""
+        text = strip_overlay_quotes((raw or "").strip()).replace("\n", " ")
+        text = text.replace("%", "%%")  # drawtext expands strftime sequences
+        if len(text) > max_len:
+            text = text[: max_len - 1].rstrip() + "\u2026"
+        fname = f"overlay_t_{line_idx:02d}_{row_idx}.txt"
+        with open(cwd / fname, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        return fname
 
     fs_overlay = resolve_scene_overlay_font_size(scene_font_size)
     style = _scene_overlay_drawtext_style(fs_overlay)
@@ -632,23 +627,23 @@ def _add_text_overlay(
         parts = [p.strip() for p in wrapped.split("\n") if p.strip()]
         if not parts:
             continue
-        # Two drawtext filters (comma-chained): textfile= is unreliable on some Windows/FFmpeg builds.
+        # textfile= with cwd-local names (no drive colons); safe for :, commas, quotes in AI text.
         row_gap = max(int(fs_overlay * 0.92), 14)
         if len(parts) >= 2:
-            esc_a = escape_drawtext_line(parts[0][:500])
-            esc_b = escape_drawtext_line(parts[1][:500])
+            tf_a = write_drawtext_textfile(idx, 0, parts[0], max_len=500)
+            tf_b = write_drawtext_textfile(idx, 1, parts[1], max_len=500)
             overlay_filters.append(
-                f"drawtext=text={esc_a}{font_clause}:{style}:"
+                f"drawtext=textfile={tf_a}{font_clause}:{style}:"
                 f"x=(w-text_w)/2:y={base_y}-{row_gap}:{enable}"
             )
             overlay_filters.append(
-                f"drawtext=text={esc_b}{font_clause}:{style}:"
+                f"drawtext=textfile={tf_b}{font_clause}:{style}:"
                 f"x=(w-text_w)/2:y={base_y}+{max(row_gap // 2, 6)}:{enable}"
             )
         else:
-            esc = escape_drawtext_line(parts[0][:900])
+            tf = write_drawtext_textfile(idx, 0, parts[0], max_len=900)
             overlay_filters.append(
-                f"drawtext=text={esc}{font_clause}:{style}:"
+                f"drawtext=textfile={tf}{font_clause}:{style}:"
                 f"x=(w-text_w)/2:y={base_y}:{enable}"
             )
 
